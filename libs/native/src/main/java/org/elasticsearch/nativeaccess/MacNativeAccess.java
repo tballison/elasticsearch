@@ -139,19 +139,4 @@ class MacNativeAccess extends PosixNativeAccess {
 
         logger.debug("BSD RLIMIT_NPROC initialization successful");
     }
-
-    @Override
-    public int open(String pathname, int flags) {
-        return libc.open(pathname, flags);
-    }
-
-    @Override
-    public int close(int fd) {
-        return libc.close(fd);
-    }
-
-    @Override
-    public int fadvise(int fd, long offset, long length, int advice) {
-        return libc.fadvise(fd, offset, length, advice);
-    }
 }

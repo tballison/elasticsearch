@@ -209,7 +209,7 @@ class JdkPosixCLibrary implements PosixCLibrary {
     @Override
     public int fadvise(int fd, long offset, long size, int advice) {
         try {
-            return -1;//(int) fadvise$mh.invokeExact(errnoState, fd, offset, size, advice);
+            return (int) fadvise$mh.invokeExact(errnoState, fd, offset, size, advice);
         } catch (Throwable t) {
             throw new AssertionError(t);
         }
