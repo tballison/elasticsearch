@@ -63,7 +63,6 @@ public class VectorIOBenchmark {
     private final Random random = new Random();
     private Directory dir;
     private IndexInput input;
-    private int fd;
 
     private ExecutorService executor;
 

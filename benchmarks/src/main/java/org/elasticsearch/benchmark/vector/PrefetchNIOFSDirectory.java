@@ -12,13 +12,12 @@ package org.elasticsearch.benchmark.vector;
 import org.apache.lucene.store.FilterIndexInput;
 import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
-import org.apache.lucene.store.NIOFSDirectory;
 import org.elasticsearch.nativeaccess.NativeAccess;
 
 import java.io.IOException;
 import java.nio.file.Path;
 
-public class PrefetchNIOFSDirectory extends NIOFSDirectory {
+public class PrefetchNIOFSDirectory extends XNIOFSDirectory {
     public static final int POSIX_FADV_NORMAL     = 0;
     public static final int POSIX_FADV_RANDOM     = 1;
     public static final int POSIX_FADV_SEQUENTIAL = 2;
@@ -56,6 +55,11 @@ public class PrefetchNIOFSDirectory extends NIOFSDirectory {
         PrefetchIndexInput(String resourceDescription, int fd, IndexInput in) {
             super(resourceDescription, in);
             this.fd = fd;
+        }
+
+        @Override
+        public void readFloats(float[] floats, int offset, int len) throws IOException {
+            in.readFloats(floats, offset, len);
         }
 
         @Override
