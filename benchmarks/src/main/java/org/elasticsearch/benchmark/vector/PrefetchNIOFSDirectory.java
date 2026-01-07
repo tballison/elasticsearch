@@ -28,13 +28,18 @@ public class PrefetchNIOFSDirectory extends NIOFSDirectory {
 
     private static NativeAccess NATIVE_ACCESS = NativeAccess.instance();
 
+    private final Path path;
+
     public PrefetchNIOFSDirectory(Path path) throws IOException {
         super(path);
+        this.path = path;
     }
 
     @Override
     public IndexInput openInput(String name, IOContext context) throws IOException {
-        int fd = NATIVE_ACCESS.open(name, 0);
+        String fileName = path.resolve(name).toString();
+        int fd = NATIVE_ACCESS.open(fileName, 0);
+        System.out.println("Open " + fileName + " " + fd);
         var in = super.openInput(name, context);
         return new PrefetchIndexInput("", fd, in);
     }
@@ -60,7 +65,7 @@ public class PrefetchNIOFSDirectory extends NIOFSDirectory {
 
         @Override
         public void close() throws IOException {
-            super.close();
+            in.close();
             NATIVE_ACCESS.close(fd);
         }
 
