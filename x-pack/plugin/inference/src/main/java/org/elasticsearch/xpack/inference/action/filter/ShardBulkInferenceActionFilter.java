@@ -100,7 +100,7 @@ public class ShardBulkInferenceActionFilter implements MappedActionFilter {
     private static final Logger logger = LogManager.getLogger(ShardBulkInferenceActionFilter.class);
 
     private static final ByteSizeValue DEFAULT_BATCH_SIZE = ByteSizeValue.ofMb(1);
-    //sentinel value meaning effectively no timeout
+    // sentinel value meaning effectively no timeout
     private static final TimeValue DEFAULT_BULK_TIMEOUT = TimeValue.MINUS_ONE;
 
     /**
@@ -134,7 +134,7 @@ public class ShardBulkInferenceActionFilter implements MappedActionFilter {
         TimeValue.MINUS_ONE,
         MAX_BULK_TIMEOUT,
         Setting.Property.NodeScope,
-        Setting.Property.Dynamic
+        Setting.Property.OperatorDynamic
     );
 
     private static final Object EXPLICIT_NULL = new Object();
@@ -295,7 +295,6 @@ public class ShardBulkInferenceActionFilter implements MappedActionFilter {
         private final IndexingPressure.Coordinating coordinatingIndexingPressure;
         private final long startTimeNanos;
         private final TimeValue inferenceTimeout;
-        private volatile boolean hasTimedOut = false;
 
         private AsyncBulkShardInferenceAction(
             boolean useLegacyFormat,
@@ -565,10 +564,9 @@ public class ShardBulkInferenceActionFilter implements MappedActionFilter {
          * @return The total content length of all newly added requests, or {@code 0} if no requests were added.
          */
         private long addFieldInferenceRequests(BulkItemRequest item, int itemIndex, Map<String, List<FieldInferenceRequest>> requestsMap) {
-            // Check timeout once per item, set flag for slot.setFailure() to use
-            if (hasTimedOut == false && getRemainingTimeout().equals(TimeValue.ZERO)) {
-                hasTimedOut = true;
-            }
+            // Check timeout once per item. We intentionally don't short-circuit the entire batch here
+            // because items without inference fields should still pass through successfully after timeout.
+            boolean hasTimedOut = getRemainingTimeout().equals(TimeValue.ZERO);
 
             boolean isUpdateRequest = false;
             final IndexRequestWithIndexingPressure indexRequest;
