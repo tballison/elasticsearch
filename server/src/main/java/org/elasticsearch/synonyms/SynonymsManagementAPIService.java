@@ -154,14 +154,6 @@ public class SynonymsManagementAPIService {
     // Package private for testing
     static Logger logger = LogManager.getLogger(SynonymsManagementAPIService.class);
 
-    public int getMaxSynonymTokens() {
-        return maxSynonymTokens;
-    }
-
-    public TokenLimitMode getTokenLimitMode() {
-        return tokenLimitMode;
-    }
-
     private final Client client;
 
     public static final String SYNONYMS_ORIGIN = "synonyms";
