@@ -45,6 +45,7 @@ import org.elasticsearch.cluster.routing.Preference;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.index.IndexNotFoundException;
+import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.query.BoolQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.index.reindex.BulkByScrollResponse;
@@ -133,7 +134,7 @@ public class SynonymsManagementAPIService {
     }
 
     // Used for testing, so we don't need to test for MAX_SYNONYMS_SETS and put unnecessary memory pressure on the test cluster
-    SynonymsManagementAPIService(Client client, int maxSynonymsSets) {
+    public SynonymsManagementAPIService(Client client, int maxSynonymsSets) {
         this(client, maxSynonymsSets, SCROLL_BATCH_SIZE);
     }
 
@@ -739,6 +740,7 @@ public class SynonymsManagementAPIService {
             .put(IndexMetadata.SETTING_NUMBER_OF_SHARDS, 1)
             .put(IndexMetadata.SETTING_AUTO_EXPAND_REPLICAS, "0-1")
             .put(IndexMetadata.INDEX_FORMAT_SETTING.getKey(), SYNONYMS_INDEX_FORMAT)
+            .put(IndexSettings.MAX_RESULT_WINDOW_SETTING.getKey(), 100_000)
             .build();
     }
 
