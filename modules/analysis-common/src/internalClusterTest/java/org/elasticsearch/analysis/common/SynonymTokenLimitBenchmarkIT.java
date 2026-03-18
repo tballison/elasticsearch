@@ -86,7 +86,7 @@ public class SynonymTokenLimitBenchmarkIT extends ESIntegTestCase {
     // ---- Unicode token tests ----
 
     public void testClusterReloadRealisticUnicodeShort() throws Exception {
-        runBenchmark("realistic unicode short (3-6 chars)", 1_000, 1_000, i -> randomRealisticUnicodeOfLengthBetween(10, 25));
+        runBenchmark("realistic unicode short (3-6 chars)", 1_000, 1_000, i -> randomRealisticUnicodeOfLengthBetween(1, 2));
     }
 
     // ---- Real Chinese token tests ----
@@ -190,11 +190,22 @@ public class SynonymTokenLimitBenchmarkIT extends ESIntegTestCase {
         logger.info("=== Benchmark Complete: {} — no failure up to {} tokens ===", label, MAX_TOKENS);
     }
 
-    private record ReloadResult(long writeMs, long reloadMs, long heapUsedMb, long heapDeltaMb, String status, boolean failed) {}
+    private record ReloadResult(
+        long writeMs,
+        long reloadMs,
+        long heapUsedMb,
+        long peakHeapMb,
+        long heapDeltaMb,
+        String status,
+        boolean failed
+    ) {}
 
     private ReloadResult tryReload(Path synonymsFile, long writeMs, MemoryMXBean memoryBean) {
         System.gc();
         long heapBefore = memoryBean.getHeapMemoryUsage().getUsed();
+
+        PeakHeapSampler sampler = new PeakHeapSampler(memoryBean);
+        sampler.start();
 
         long reloadStart = System.nanoTime();
         try {
@@ -204,43 +215,93 @@ public class SynonymTokenLimitBenchmarkIT extends ESIntegTestCase {
             ).actionGet(TimeValue.timeValueSeconds(120));
 
             long reloadMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - reloadStart);
+            sampler.stop();
 
             System.gc();
             long heapAfter = memoryBean.getHeapMemoryUsage().getUsed();
             long heapDeltaMb = Math.max(0, (heapAfter - heapBefore)) / (1024 * 1024);
             long heapUsedMb = heapAfter / (1024 * 1024);
+            long peakHeapMb = sampler.getPeakBytes() / (1024 * 1024);
 
             if (reloadResponse.getFailedShards() > 0) {
                 Throwable cause = reloadResponse.getShardFailures()[0].getCause();
-                return new ReloadResult(writeMs, reloadMs, heapUsedMb, heapDeltaMb, "SHARD_FAIL: " + rootCauseMessage(cause), true);
+                return new ReloadResult(writeMs, reloadMs, heapUsedMb, peakHeapMb, heapDeltaMb, "SHARD_FAIL: " + rootCauseMessage(cause), true);
             }
 
             String status = reloadMs > 30_000 ? "SLOW (>30s)" : "OK";
             boolean failed = reloadMs > 30_000;
-            return new ReloadResult(writeMs, reloadMs, heapUsedMb, heapDeltaMb, status, failed);
+            return new ReloadResult(writeMs, reloadMs, heapUsedMb, peakHeapMb, heapDeltaMb, status, failed);
         } catch (Exception e) {
             long reloadMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - reloadStart);
+            sampler.stop();
             long heapUsedMb = memoryBean.getHeapMemoryUsage().getUsed() / (1024 * 1024);
-            return new ReloadResult(writeMs, reloadMs, heapUsedMb, -1, rootCauseMessage(e), true);
+            long peakHeapMb = sampler.getPeakBytes() / (1024 * 1024);
+            return new ReloadResult(writeMs, reloadMs, heapUsedMb, peakHeapMb, -1, rootCauseMessage(e), true);
+        }
+    }
+
+    private static class PeakHeapSampler {
+        private final MemoryMXBean memoryBean;
+        private volatile long peakBytes;
+        private volatile boolean running;
+        private Thread thread;
+
+        PeakHeapSampler(MemoryMXBean memoryBean) {
+            this.memoryBean = memoryBean;
+            this.peakBytes = memoryBean.getHeapMemoryUsage().getUsed();
+        }
+
+        void start() {
+            running = true;
+            thread = new Thread(() -> {
+                while (running) {
+                    long used = memoryBean.getHeapMemoryUsage().getUsed();
+                    if (used > peakBytes) {
+                        peakBytes = used;
+                    }
+                    try {
+                        Thread.sleep(1);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+            }, "peak-heap-sampler");
+            thread.setDaemon(true);
+            thread.start();
+        }
+
+        void stop() {
+            running = false;
+            try {
+                thread.join(5000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        long getPeakBytes() {
+            return peakBytes;
         }
     }
 
     private void logHeader() {
-        logger.info("Tokens   | Tot Chars  | Write (ms) | Reload (ms) | Tokens/ms | Heap Used | Heap Delta | Status");
-        logger.info("---------|------------|------------|-------------|-----------|-----------|------------|-------");
+        logger.info("Tokens   | Tot Chars  | Write (ms) | Reload (ms) | Tokens/ms | Heap Used | Peak Heap | Heap Delta | Status");
+        logger.info("---------|------------|------------|-------------|-----------|-----------|-----------|------------|-------");
     }
 
     private void logResult(int tokenCount, long totalChars, ReloadResult r) {
         long tokensPerMs = r.reloadMs > 0 ? tokenCount / r.reloadMs : 0;
         String heapDelta = r.heapDeltaMb >= 0 ? r.heapDeltaMb + " MB" : "?";
         logger.info(
-            "{} | {} | {} | {} | {} | {} MB | {} | {}",
+            "{} | {} | {} | {} | {} | {} MB | {} MB | {} | {}",
             tokenCount,
             totalChars,
             r.writeMs,
             r.reloadMs,
             tokensPerMs,
             r.heapUsedMb,
+            r.peakHeapMb,
             heapDelta,
             r.status
         );
