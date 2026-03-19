@@ -44,7 +44,7 @@ public class SortedSynonymMapBuilderTests extends ESTokenStreamTestCase {
 
     private static SynonymMap buildWithSortedBuilder(SynonymRule[] rules, Analyzer analyzer, boolean expand)
         throws Exception {
-        try (SortedSynonymMapBuilder builder = new SortedSynonymMapBuilder()) {
+        try (SortedSynonymMapBuilder builder = new SortedSynonymMapBuilder(NOOP_BREAKER)) {
             builder.parse(rules, analyzer, expand, false);
             return builder.build();
         }
@@ -140,7 +140,7 @@ public class SortedSynonymMapBuilderTests extends ESTokenStreamTestCase {
             new SynonymRule("r1", "  "),
             new SynonymRule("r2", "apple => fruit")
         };
-        try (SortedSynonymMapBuilder builder = new SortedSynonymMapBuilder()) {
+        try (SortedSynonymMapBuilder builder = new SortedSynonymMapBuilder(NOOP_BREAKER)) {
             builder.parse(rules, analyzer, false, true);
             SynonymMap map = builder.build();
 

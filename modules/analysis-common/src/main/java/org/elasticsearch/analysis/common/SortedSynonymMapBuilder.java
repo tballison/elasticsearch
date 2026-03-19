@@ -31,6 +31,7 @@ import org.apache.lucene.util.fst.ByteSequenceOutputs;
 import org.apache.lucene.util.fst.FST;
 import org.apache.lucene.util.fst.FSTCompiler;
 import org.apache.lucene.util.fst.Util;
+import org.elasticsearch.common.breaker.CircuitBreaker;
 import org.elasticsearch.synonyms.SynonymRule;
 
 import java.io.Closeable;
@@ -86,12 +87,15 @@ public class SortedSynonymMapBuilder implements Closeable {
     private final BytesRefBuilder utf8Input = new BytesRefBuilder();
     private final BytesRefBuilder utf8Output = new BytesRefBuilder();
 
+    private final CircuitBreaker circuitBreaker;
+
     int maxHorizontalContext = 1;
     private int pairCount = 0;
     private boolean writerClosed = false;
     private boolean cleaned = false;
 
-    public SortedSynonymMapBuilder() throws IOException {
+    public SortedSynonymMapBuilder(CircuitBreaker circuitBreaker) throws IOException {
+        this.circuitBreaker = circuitBreaker;
         tempDir = Files.createTempDirectory("es-synonyms-sort");
         directory = FSDirectory.open(tempDir);
         rawOutput = directory.createOutput(INPUT_FILE, IOContext.DEFAULT);
@@ -193,6 +197,7 @@ public class SortedSynonymMapBuilder implements Closeable {
 
         writer.write(buf, 0, totalLen);
         pairCount++;
+        circuitBreaker.addEstimateBytesAndMaybeBreak(0L, "Synonyms");
 
         maxHorizontalContext = Math.max(maxHorizontalContext, countWords(input));
         maxHorizontalContext = Math.max(maxHorizontalContext, countWords(output));
@@ -220,7 +225,7 @@ public class SortedSynonymMapBuilder implements Closeable {
             String sortedFile = sorter.sort(INPUT_FILE);
             try (ChecksumIndexInput in = directory.openChecksumInput(sortedFile);
                  OfflineSorter.ByteSequencesReader reader = new OfflineSorter.ByteSequencesReader(in, sortedFile)) {
-                return buildFromSortedReader(reader, maxHorizontalContext);
+                return buildFromSortedReader(reader, maxHorizontalContext, circuitBreaker);
             }
         } finally {
             cleanup();
@@ -270,8 +275,8 @@ public class SortedSynonymMapBuilder implements Closeable {
      * same-input records and deduplicating output ords on the fly.
      * Package-private for testing.
      */
-    static SynonymMap buildFromSortedReader(OfflineSorter.ByteSequencesReader reader, int maxHorizontalContext)
-        throws IOException {
+    static SynonymMap buildFromSortedReader(OfflineSorter.ByteSequencesReader reader, int maxHorizontalContext,
+                                             CircuitBreaker circuitBreaker) throws IOException {
 
         BytesRefHash words = new BytesRefHash();
         BytesRefBuilder utf8Scratch = new BytesRefBuilder();
@@ -282,6 +287,7 @@ public class SortedSynonymMapBuilder implements Closeable {
 
         BytesRef record = reader.next();
         while (record != null) {
+            circuitBreaker.addEstimateBytesAndMaybeBreak(0L, "Synonyms");
             // Save the input bytes from the first record of this group
             int inputLen = ((record.bytes[record.offset] & 0xFF) << 8) | (record.bytes[record.offset + 1] & 0xFF);
             byte[] inputBytes = Arrays.copyOfRange(record.bytes, record.offset + 2, record.offset + 2 + inputLen);
