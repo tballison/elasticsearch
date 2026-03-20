@@ -1,0 +1,5 @@
+{
+  "type" : "hnsw",
+  "m" : 16,
+  "ef_construction" : 100
+}

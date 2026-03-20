@@ -1,0 +1,6 @@
+{
+  "type" : "int4_hnsw",
+  "m" : 16,
+  "ef_construction" : 100,
+  "confidence_interval" : 0.0
+}

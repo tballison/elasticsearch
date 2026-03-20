@@ -1,0 +1,6 @@
+{
+  "type" : "bbq_flat",
+  "rescore_vector" : {
+    "oversample" : 3.0
+  }
+}

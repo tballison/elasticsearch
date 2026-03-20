@@ -8,3 +8,12 @@ steps:
       image: family/elasticsearch-ubuntu-2404
       machineType: custom-16-32768
       buildDirectory: /dev/shm/bk
+  - label: update-serialization-history
+    command: '.buildkite/scripts/update-serialization-history.sh'
+    # Serialization history is tracked on main only
+    if: build.env('BUILDKITE_PULL_REQUEST_BASE_BRANCH') == 'main'
+    agents:
+      provider: gcp
+      image: family/elasticsearch-ubuntu-2404
+      machineType: custom-16-32768
+      buildDirectory: /dev/shm/bk

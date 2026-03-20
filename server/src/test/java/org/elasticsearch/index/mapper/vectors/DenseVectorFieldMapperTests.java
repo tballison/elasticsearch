@@ -24,6 +24,8 @@ import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.IOConsumer;
 import org.apache.lucene.util.VectorUtil;
+import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.BigArrays;
@@ -60,16 +62,23 @@ import org.elasticsearch.simdvec.VectorScorerFactory;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.test.IndexSettingsModule;
 import org.elasticsearch.test.index.IndexVersionUtils;
+import org.elasticsearch.test.serialization.SerializationHistorySource;
+import org.elasticsearch.test.serialization.SerializationHistoryTestHelper;
 import org.elasticsearch.threadpool.TestThreadPool;
+import org.elasticsearch.xcontent.ToXContent;
 import org.elasticsearch.xcontent.XContentBuilder;
+import org.elasticsearch.xcontent.XContentFactory;
+import org.elasticsearch.xcontent.XContentType;
 import org.hamcrest.Matcher;
 import org.junit.AssumptionViolatedException;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -2307,6 +2316,40 @@ public class DenseVectorFieldMapperTests extends SyntheticVectorsMapperTestCase 
         }
     }
 
+    public void testHistoricalFormatsRoundTripToCurrentDefault() throws Exception {
+        SerializationHistoryTestHelper.assertHistoricalFormatsRoundTrip(new SerializationHistory(), this::roundTrip);
+    }
+
+    private String roundTrip(String typeName, String historicalJson) throws Exception {
+        return roundTripJson(historicalJson, IndexVersion.current());
+    }
+
+    private static String roundTripJson(String json, IndexVersion indexVersion) throws Exception {
+        Map<String, Object> map = XContentHelper.convertToMap(new BytesArray(json), true, XContentType.JSON).v2();
+        Object typeNode = map.remove("type");
+        String type = (String) typeNode;
+        DenseVectorFieldMapper.VectorIndexType vectorIndexType = DenseVectorFieldMapper.VectorIndexType.fromString(type)
+            .orElseThrow(() -> new IllegalArgumentException("Unknown vector index type: " + type));
+        DenseVectorFieldMapper.DenseVectorIndexOptions opts = vectorIndexType.parseIndexOptions(
+            "test",
+            map,
+            indexVersion,
+            false
+        );
+        XContentBuilder b = XContentFactory.jsonBuilder().prettyPrint();
+        opts.toXContent(b, ToXContent.EMPTY_PARAMS);
+        return Strings.toString(b) + "\n";
+    }
+
+    private static Map<String, String> buildIndexOptionsDefaults() throws Exception {
+        String[] typeNames = { "hnsw", "int8_hnsw", "int4_hnsw", "bbq_hnsw", "flat", "int8_flat", "int4_flat", "bbq_flat", "bbq_disk" };
+        Map<String, String> defaults = new LinkedHashMap<>();
+        for (String typeName : typeNames) {
+            defaults.put(typeName, roundTripJson("{\"type\":\"" + typeName + "\"}", IndexVersion.current()));
+        }
+        return defaults;
+    }
+
     @Override
     protected IngestScriptSupport ingestScriptSupport() {
         throw new AssumptionViolatedException("not supported");
@@ -2368,6 +2411,22 @@ public class DenseVectorFieldMapperTests extends SyntheticVectorsMapperTestCase 
     @Override
     public void testSyntheticSourceKeepArrays() {
         // The mapper expects to parse an array of values by default, it's not compatible with array of arrays.
+    }
+
+    /**
+     * ServiceLoader entry point for serialization history.
+     * Registered in META-INF/services/org.elasticsearch.test.serialization.SerializationHistorySource.
+     */
+    public static class SerializationHistory implements SerializationHistorySource {
+        @Override
+        public String historyResourcePath() {
+            return "org/elasticsearch/index/mapper/vectors/dense-vector-field-mapper-tests";
+        }
+
+        @Override
+        public Map<String, String> currentDefaults() throws Exception {
+            return buildIndexOptionsDefaults();
+        }
     }
 
     private static class TestDenseVectorIndexOptions extends DenseVectorFieldMapper.DenseVectorIndexOptions {

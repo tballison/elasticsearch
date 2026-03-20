@@ -413,6 +413,86 @@ public abstract class TransportVersionResourcesService implements BuildService<T
         return Files.exists(Path.of(gitDir).resolve(refName));
     }
 
+    /** Returns the repository root directory. */
+    Path getRepoRoot() {
+        return rootDir;
+    }
+
+    /**
+     * Returns the transport version ID (as an integer) for the upper bound with the given name,
+     * or {@code -1} if no such upper bound exists.
+     */
+    int getUpperBoundId(String name) throws IOException {
+        TransportVersionUpperBound bound = getUpperBounds().get(name);
+        return bound != null ? bound.definitionId().complete() : -1;
+    }
+
+    /** Runs {@code git add <absolutePath>} from the repo root. */
+    void gitAddAbsolute(Path absolutePath) {
+        gitCommandFromRoot("add", absolutePath.toString());
+    }
+
+    /** Runs {@code git rm --force <absolutePath>} from the repo root. */
+    void gitRmAbsolute(Path absolutePath) {
+        gitCommandFromRoot("rm", "--force", absolutePath.toString());
+    }
+
+    /**
+     * Lists the files in {@code repoRelPath} at the git merge base, one per line.
+     * Returns an empty string if the path does not exist at the merge base.
+     */
+    String listFilesAtBase(String repoRelPath) {
+        try {
+            return gitCommandFromRoot("ls-tree", "--name-only", getBaseRefName(), repoRelPath);
+        } catch (RuntimeException e) {
+            return "";
+        }
+    }
+
+    /**
+     * Returns the content of {@code repoRelPath} at the git merge base, or {@code null} if it
+     * does not exist there.
+     */
+    String readFileAtBase(String repoRelPath) {
+        try {
+            return gitCommandFromRoot("show", getBaseRefName() + ":" + repoRelPath);
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    // run a git command from the repository root directory
+    private String gitCommandFromRoot(String... args) {
+        ByteArrayOutputStream stdout = new ByteArrayOutputStream();
+
+        List<String> command = new ArrayList<>();
+        Collections.addAll(command, "git", "-C", rootDir.toString());
+        Collections.addAll(command, args);
+
+        ExecResult result = getExecOperations().exec(spec -> {
+            spec.setCommandLine(command);
+            spec.setStandardOutput(stdout);
+            spec.setErrorOutput(stdout);
+            spec.setIgnoreExitValue(true);
+        });
+
+        if (result.getExitValue() != 0) {
+            throw new RuntimeException(
+                "git command failed with exit code "
+                    + result.getExitValue()
+                    + System.lineSeparator()
+                    + "command: "
+                    + String.join(" ", command)
+                    + System.lineSeparator()
+                    + "output:"
+                    + System.lineSeparator()
+                    + stdout.toString(StandardCharsets.UTF_8)
+            );
+        }
+
+        return stdout.toString(StandardCharsets.UTF_8);
+    }
+
     private static Map<String, TransportVersionDefinition> readDefinitions(Path dir, boolean isReferable) throws IOException {
         if (Files.isDirectory(dir) == false) {
             return Map.of();

@@ -133,6 +133,17 @@ public class TransportVersionResourcesPlugin implements Plugin<Project> {
                     .set(project.getLayout().getProjectDirectory().file("src/main/resources/org/elasticsearch/TransportVersions.csv"));
             });
         validateTask.configure(t -> t.mustRunAfter(updateTransportVersionsTask));
+
+        project.getPluginManager().withPlugin("java", p -> {
+            project.getTasks().register("generateSerializationHistory", GenerateSerializationHistoryTask.class, t -> {
+                t.setGroup(taskGroup);
+                t.setDescription("Generates serialization history files for changed serialization formats");
+                t.getTestClasspath().from(project.getConfigurations().named(JavaPlugin.TEST_RUNTIME_CLASSPATH_CONFIGURATION_NAME));
+                t.getTestClasspath().from(project.getTasks().named(JavaPlugin.TEST_CLASSES_TASK_NAME));
+                t.getTestResourcesRoot().set(project.getLayout().getProjectDirectory().dir("src/test/resources"));
+                t.getCurrentUpperBoundName().convention(currentVersion.getMajor() + "." + currentVersion.getMinor());
+            });
+        });
     }
 
     private static String getResourceRoot(Project project) {
