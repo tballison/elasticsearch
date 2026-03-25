@@ -363,7 +363,7 @@ public class Analysis {
         }
     }
 
-    public static Reader getReaderFromIndex(
+    public static SynonymRule[] getSynonymRulesFromIndex(
         String synonymsSet,
         SynonymsManagementAPIService synonymsManagementAPIService,
         boolean ignoreMissing
@@ -397,7 +397,15 @@ public class Analysis {
             results = new PagedResult<>(0, new SynonymRule[0]);
         }
 
-        SynonymRule[] synonymRules = results.pageResults();
+        return results.pageResults();
+    }
+
+    public static Reader getReaderFromIndex(
+        String synonymsSet,
+        SynonymsManagementAPIService synonymsManagementAPIService,
+        boolean ignoreMissing
+    ) {
+        SynonymRule[] synonymRules = getSynonymRulesFromIndex(synonymsSet, synonymsManagementAPIService, ignoreMissing);
         StringBuilder sb = new StringBuilder();
         for (SynonymRule synonymRule : synonymRules) {
             sb.append(synonymRule.synonyms()).append(System.lineSeparator());

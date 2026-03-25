@@ -36,7 +36,7 @@ import java.util.Set;
  * any memory checks; this version periodically checks the circuit breaker during FST construction to
  * prevent unbounded memory growth.
  */
-class ESSynonymMapBuilder {
+class ESSynonymMapBuilder implements SynonymPairAcceptor {
 
     private final HashMap<CharsRef, MapEntry> workingSet = new HashMap<>();
     private final BytesRefHash words = new BytesRefHash();
@@ -57,7 +57,7 @@ class ESSynonymMapBuilder {
         this.circuitBreaker = circuitBreaker;
     }
 
-    void add(CharsRef input, CharsRef output, boolean includeOrig) {
+    public void add(CharsRef input, CharsRef output, boolean includeOrig) {
         int numInputWords = countWords(input);
         int numOutputWords = countWords(output);
 
@@ -98,7 +98,7 @@ class ESSynonymMapBuilder {
         maxHorizontalContext = Math.max(maxHorizontalContext, numOutputWords);
     }
 
-    SynonymMap build() throws IOException {
+    public SynonymMap build() throws IOException {
         ByteSequenceOutputs outputs = ByteSequenceOutputs.getSingleton();
         // TODO: consider setting suffixRAMLimitMB to cap NodeHash memory during FST compilation
         FSTCompiler<BytesRef> fstCompiler = new FSTCompiler.Builder<>(FST.INPUT_TYPE.BYTE4, outputs).build();
@@ -170,7 +170,7 @@ class ESSynonymMapBuilder {
         return new SynonymMap(fst, words, maxHorizontalContext);
     }
 
-    private static int countWords(CharsRef chars) {
+    static int countWords(CharsRef chars) {
         int wordCount = 1;
         int upto = chars.offset;
         final int limit = chars.offset + chars.length;

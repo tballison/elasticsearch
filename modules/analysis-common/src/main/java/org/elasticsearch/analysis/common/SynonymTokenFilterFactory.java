@@ -43,6 +43,11 @@ public class SynonymTokenFilterFactory extends AbstractTokenFilterFactory {
 
     private static final SynonymMap EMPTY_SYNONYM_MAP = buildEmptySynonymMap();
 
+    static final int DISK_SORT_THRESHOLD = 10_000;
+
+    /** Overridable in tests to trigger the disk path without needing 10k rules. */
+    int diskSortThreshold = DISK_SORT_THRESHOLD;
+
     protected enum SynonymsSource {
         INLINE("synonyms") {
             @Override
@@ -80,10 +85,16 @@ public class SynonymTokenFilterFactory extends AbstractTokenFilterFactory {
                         synonymsSet
                     );
                 } else {
+                    var rules = Analysis.getSynonymRulesFromIndex(
+                        synonymsSet,
+                        factory.synonymsManagementAPIService,
+                        factory.lenient
+                    );
                     reader = new ReaderWithOrigin(
-                        Analysis.getReaderFromIndex(synonymsSet, factory.synonymsManagementAPIService, factory.lenient),
+                        rulesAsReader(rules),
                         "[" + synonymsSet + "] synonyms_set in .synonyms index",
-                        synonymsSet
+                        synonymsSet,
+                        rules.length
                     );
                 }
 
@@ -238,32 +249,50 @@ public class SynonymTokenFilterFactory extends AbstractTokenFilterFactory {
         );
     }
 
-    SynonymMap buildSynonyms(Analyzer analyzer, ReaderWithOrigin rules) {
+    SynonymMap buildSynonyms(Analyzer analyzer, ReaderWithOrigin rulesReader) {
         try {
+            if ("wordnet".equalsIgnoreCase(format) == false && rulesReader.ruleCount() >= diskSortThreshold) {
+                try (SortedSynonymMapBuilder builder = new SortedSynonymMapBuilder(circuitBreaker, environment.tmpDir())) {
+                    ESSolrSynonymParser parser = new ESSolrSynonymParser(true, expand, lenient, analyzer, builder);
+                    parser.parse(rulesReader.reader());
+                    return parser.build();
+                }
+            }
             SynonymMap.Builder parser;
             if ("wordnet".equalsIgnoreCase(format)) {
                 parser = new ESWordnetSynonymParser(true, expand, lenient, analyzer, circuitBreaker);
-                ((ESWordnetSynonymParser) parser).parse(rules.reader);
+                ((ESWordnetSynonymParser) parser).parse(rulesReader.reader());
             } else {
                 parser = new ESSolrSynonymParser(true, expand, lenient, analyzer, circuitBreaker);
-                ((ESSolrSynonymParser) parser).parse(rules.reader);
+                ((ESSolrSynonymParser) parser).parse(rulesReader.reader());
             }
             return parser.build();
         } catch (Exception e) {
-            String message = "failed to build synonyms from [" + rules.origin + "]";
+            String message = "failed to build synonyms from [" + rulesReader.origin() + "]";
             if (lenient && e instanceof CircuitBreakingException) {
                 LOGGER.error(message + ". Using an empty synonyms map in its place because lenient=true.", e);
                 return EMPTY_SYNONYM_MAP;
             }
-
             throw new IllegalArgumentException(message, e);
         }
     }
 
-    record ReaderWithOrigin(Reader reader, String origin, String resource) {
+    record ReaderWithOrigin(Reader reader, String origin, String resource, int ruleCount) {
         ReaderWithOrigin(Reader reader, String origin) {
-            this(reader, origin, null);
+            this(reader, origin, null, 0);
         }
+
+        ReaderWithOrigin(Reader reader, String origin, String resource) {
+            this(reader, origin, resource, 0);
+        }
+    }
+
+    private static Reader rulesAsReader(org.elasticsearch.synonyms.SynonymRule[] rules) {
+        StringBuilder sb = new StringBuilder();
+        for (var rule : rules) {
+            sb.append(rule.synonyms()).append(System.lineSeparator());
+        }
+        return new StringReader(sb.toString());
     }
 
     private static SynonymMap buildEmptySynonymMap() {

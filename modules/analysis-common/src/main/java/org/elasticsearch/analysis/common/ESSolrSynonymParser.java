@@ -24,12 +24,16 @@ public class ESSolrSynonymParser extends SolrSynonymParser {
     private static final Logger logger = LogManager.getLogger(ESSolrSynonymParser.class);
 
     private final boolean lenient;
-    private final ESSynonymMapBuilder esBuilder;
+    private final SynonymPairAcceptor esBuilder;
 
     public ESSolrSynonymParser(boolean dedup, boolean expand, boolean lenient, Analyzer analyzer, CircuitBreaker circuitBreaker) {
+        this(dedup, expand, lenient, analyzer, new ESSynonymMapBuilder(dedup, circuitBreaker));
+    }
+
+    ESSolrSynonymParser(boolean dedup, boolean expand, boolean lenient, Analyzer analyzer, SynonymPairAcceptor backend) {
         super(dedup, expand, analyzer);
         this.lenient = lenient;
-        this.esBuilder = new ESSynonymMapBuilder(dedup, circuitBreaker);
+        this.esBuilder = backend;
     }
 
     @Override

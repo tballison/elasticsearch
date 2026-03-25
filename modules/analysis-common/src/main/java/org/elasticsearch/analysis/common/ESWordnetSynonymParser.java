@@ -24,12 +24,16 @@ public class ESWordnetSynonymParser extends WordnetSynonymParser {
     private static final Logger logger = LogManager.getLogger(ESWordnetSynonymParser.class);
 
     private final boolean lenient;
-    private final ESSynonymMapBuilder esBuilder;
+    private final SynonymPairAcceptor esBuilder;
 
     public ESWordnetSynonymParser(boolean dedup, boolean expand, boolean lenient, Analyzer analyzer, CircuitBreaker circuitBreaker) {
+        this(dedup, expand, lenient, analyzer, new ESSynonymMapBuilder(dedup, circuitBreaker));
+    }
+
+    ESWordnetSynonymParser(boolean dedup, boolean expand, boolean lenient, Analyzer analyzer, SynonymPairAcceptor backend) {
         super(dedup, expand, analyzer);
         this.lenient = lenient;
-        this.esBuilder = new ESSynonymMapBuilder(dedup, circuitBreaker);
+        this.esBuilder = backend;
     }
 
     @Override
