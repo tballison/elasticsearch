@@ -1,0 +1,158 @@
+setup:
+  - requires:
+      cluster_features: ["gte_v8.10.0"]
+      reason: Introduced in 8.10.0
+
+---
+"Append to existing synonym set":
+
+  - requires:
+      test_runner_features: [ capabilities ]
+      capabilities:
+        - method: PUT
+          path: /_synonyms/{synonymsSet}
+          capabilities: [ synonyms_append_param ]
+      reason: "synonyms append param capability needed"
+
+  - do:
+      synonyms.put_synonym:
+        id: test-append-synonyms
+        body:
+          synonyms_set:
+            - synonyms: "hello, hi"
+              id: "rule-1"
+            - synonyms: "bye => goodbye"
+              id: "rule-2"
+
+  - match: { result: "created" }
+
+  - do:
+      synonyms.put_synonym:
+        id: test-append-synonyms
+        append: true
+        body:
+          synonyms_set:
+            - synonyms: "car, auto"
+              id: "rule-3"
+
+  - match: { result: "updated" }
+
+  - do:
+      synonyms.get_synonym:
+        id: test-append-synonyms
+
+  - match: { count: 3 }
+  - match:
+      synonyms_set:
+        - synonyms: "hello, hi"
+          id: "rule-1"
+        - synonyms: "bye => goodbye"
+          id: "rule-2"
+        - synonyms: "car, auto"
+          id: "rule-3"
+
+---
+"Append updates existing rule by id":
+
+  - requires:
+      test_runner_features: [ capabilities ]
+      capabilities:
+        - method: PUT
+          path: /_synonyms/{synonymsSet}
+          capabilities: [ synonyms_append_param ]
+      reason: "synonyms append param capability needed"
+
+  - do:
+      synonyms.put_synonym:
+        id: test-append-update-synonyms
+        body:
+          synonyms_set:
+            - synonyms: "hello, hi"
+              id: "rule-1"
+            - synonyms: "bye => goodbye"
+              id: "rule-2"
+
+  - match: { result: "created" }
+
+  - do:
+      synonyms.put_synonym:
+        id: test-append-update-synonyms
+        append: true
+        body:
+          synonyms_set:
+            - synonyms: "bye, goodbye, seeya"
+              id: "rule-2"
+
+  - match: { result: "updated" }
+
+  - do:
+      synonyms.get_synonym:
+        id: test-append-update-synonyms
+
+  - match: { count: 2 }
+  - match:
+      synonyms_set:
+        - synonyms: "hello, hi"
+          id: "rule-1"
+        - synonyms: "bye, goodbye, seeya"
+          id: "rule-2"
+
+---
+"Append to non-existing set creates it":
+
+  - requires:
+      test_runner_features: [ capabilities ]
+      capabilities:
+        - method: PUT
+          path: /_synonyms/{synonymsSet}
+          capabilities: [ synonyms_append_param ]
+      reason: "synonyms append param capability needed"
+
+  - do:
+      synonyms.put_synonym:
+        id: test-append-create-synonyms
+        append: true
+        body:
+          synonyms_set:
+            - synonyms: "hello, hi"
+              id: "rule-1"
+
+  - match: { result: "created" }
+
+  - do:
+      synonyms.get_synonym:
+        id: test-append-create-synonyms
+
+  - match: { count: 1 }
+
+---
+"Append without refresh returns no reload details":
+
+  - requires:
+      test_runner_features: [ capabilities ]
+      capabilities:
+        - method: PUT
+          path: /_synonyms/{synonymsSet}
+          capabilities: [ synonyms_append_param, synonyms_refresh_param ]
+      reason: "synonyms append and refresh param capabilities needed"
+
+  - do:
+      synonyms.put_synonym:
+        id: test-append-norefresh-synonyms
+        body:
+          synonyms_set:
+            - synonyms: "hello, hi"
+              id: "rule-1"
+
+  - do:
+      synonyms.put_synonym:
+        id: test-append-norefresh-synonyms
+        append: true
+        refresh: false
+        body:
+          synonyms_set:
+            - synonyms: "car, auto"
+              id: "rule-2"
+
+  - match: { result: "updated" }
+  - not_exists: reload_analyzers_details

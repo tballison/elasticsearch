@@ -43,6 +43,7 @@ import org.elasticsearch.client.internal.Client;
 import org.elasticsearch.client.internal.OriginSettingClient;
 import org.elasticsearch.cluster.metadata.IndexMetadata;
 import org.elasticsearch.cluster.routing.Preference;
+import org.elasticsearch.common.UUIDs;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.TimeValue;
@@ -52,9 +53,9 @@ import org.elasticsearch.index.query.QueryBuilders;
 import org.elasticsearch.index.reindex.BulkByScrollResponse;
 import org.elasticsearch.index.reindex.DeleteByQueryAction;
 import org.elasticsearch.index.reindex.DeleteByQueryRequest;
+import org.elasticsearch.index.seqno.SequenceNumbers;
 import org.elasticsearch.indices.IndexCreationException;
 import org.elasticsearch.indices.SystemIndexDescriptor;
-import org.elasticsearch.rest.RestStatus;
 import org.elasticsearch.search.SearchHit;
 import org.elasticsearch.search.aggregations.BucketOrder;
 import org.elasticsearch.search.aggregations.bucket.filter.Filters;
@@ -113,7 +114,9 @@ public class SynonymsManagementAPIService {
     private static final String SYNONYM_SETS_AGG_NAME = "synonym_sets_aggr";
     private static final String RULE_COUNT_AGG_NAME = "rule_count";
     private static final String RULE_COUNT_FILTER_KEY = "synonym_rules";
-    private static final int SYNONYMS_INDEX_MAPPINGS_VERSION = 1;
+    private static final int SYNONYMS_INDEX_MAPPINGS_VERSION = 2;
+    private static final String GENERATION_FIELD = "generation";
+    private static final String CURRENT_GENERATION_FIELD = "current_generation";
     public static final int INDEX_SEARCHABLE_TIMEOUT_SECONDS = 30;
 
     private final int maxSynonymRules;
@@ -201,6 +204,16 @@ public class SynonymsManagementAPIService {
                             builder.field("type", "keyword");
                         }
                         builder.endObject();
+                        builder.startObject(GENERATION_FIELD);
+                        {
+                            builder.field("type", "keyword");
+                        }
+                        builder.endObject();
+                        builder.startObject(CURRENT_GENERATION_FIELD);
+                        {
+                            builder.field("type", "keyword");
+                        }
+                        builder.endObject();
                     }
                     builder.endObject();
                 }
@@ -272,28 +285,48 @@ public class SynonymsManagementAPIService {
      * @param listener     receives the complete set of rules
      */
     public void getSynonymSetRules(String synonymSetId, ActionListener<PagedResult<SynonymRule>> listener) {
-        OpenPointInTimeRequest pitRequest = new OpenPointInTimeRequest(SYNONYMS_ALIAS_NAME).keepAlive(PIT_KEEP_ALIVE);
-        client.execute(
-            TransportOpenPointInTimeAction.TYPE,
-            pitRequest,
-            new DelegatingIndexNotFoundActionListener<>(synonymSetId, listener, (l, pitResponse) -> {
-                fetchPageWithPit(synonymSetId, pitResponse.getPointInTimeId(), null, new ArrayList<>(), l);
-            })
-        );
+        client.prepareGet(SYNONYMS_ALIAS_NAME, synonymSetId).execute(ActionListener.wrap(getResponse -> {
+            String currentGeneration = null;
+            if (getResponse.isExists()) {
+                Object val = getResponse.getSourceAsMap().get(CURRENT_GENERATION_FIELD);
+                if (val instanceof String s) {
+                    currentGeneration = s;
+                }
+            }
+            final String generation = currentGeneration;
+            OpenPointInTimeRequest pitRequest = new OpenPointInTimeRequest(SYNONYMS_ALIAS_NAME).keepAlive(PIT_KEEP_ALIVE);
+            client.execute(
+                TransportOpenPointInTimeAction.TYPE,
+                pitRequest,
+                new DelegatingIndexNotFoundActionListener<>(synonymSetId, listener, (l, pitResponse) -> {
+                    fetchPageWithPit(synonymSetId, generation, pitResponse.getPointInTimeId(), null, new ArrayList<>(), l);
+                })
+            );
+        }, e -> {
+            Throwable cause = ExceptionsHelper.unwrapCause(e);
+            if (cause instanceof IndexNotFoundException) {
+                listener.onFailure(new ResourceNotFoundException("synonyms set [" + synonymSetId + "] not found"));
+            } else {
+                listener.onFailure(e);
+            }
+        }));
     }
 
     private void fetchPageWithPit(
         String synonymSetId,
+        String generation,
         BytesReference pitId,
         Object[] searchAfter,
         List<SynonymRule> accumulated,
         ActionListener<PagedResult<SynonymRule>> listener
     ) {
-        SearchSourceBuilder source = new SearchSourceBuilder().query(
-            QueryBuilders.boolQuery()
-                .must(QueryBuilders.termQuery(SYNONYMS_SET_FIELD, synonymSetId))
-                .filter(QueryBuilders.termQuery(OBJECT_TYPE_FIELD, SYNONYM_RULE_OBJECT_TYPE))
-        )
+        BoolQueryBuilder query = QueryBuilders.boolQuery()
+            .must(QueryBuilders.termQuery(SYNONYMS_SET_FIELD, synonymSetId))
+            .filter(QueryBuilders.termQuery(OBJECT_TYPE_FIELD, SYNONYM_RULE_OBJECT_TYPE));
+        if (generation != null) {
+            query.filter(QueryBuilders.termQuery(GENERATION_FIELD, generation));
+        }
+        SearchSourceBuilder source = new SearchSourceBuilder().query(query)
             .size(pitBatchSize)
             .sort(SortBuilders.fieldSort(SYNONYM_RULE_ID_FIELD).order(SortOrder.ASC))
             .sort(SortBuilders.fieldSort("_shard_doc").order(SortOrder.ASC))
@@ -344,7 +377,7 @@ public class SynonymsManagementAPIService {
             }
 
             Object[] lastSortValues = hits[hits.length - 1].getSortValues();
-            fetchPageWithPit(synonymSetId, currentPitId.get(), lastSortValues, accumulated, listener);
+            fetchPageWithPit(synonymSetId, generation, currentPitId.get(), lastSortValues, accumulated, listener);
         }, e -> { closePitAndThen(currentPitId.get(), () -> listener.onFailure(e)); }));
     }
 
@@ -436,62 +469,124 @@ public class SynonymsManagementAPIService {
             );
             return;
         }
-        deleteSynonymsSetObjects(synonymSetId, listener.delegateFailure((deleteByQueryResponseListener, bulkDeleteResponse) -> {
-            boolean created = bulkDeleteResponse.getDeleted() == 0;
-            final List<BulkItemResponse.Failure> bulkDeleteFailures = bulkDeleteResponse.getBulkFailures();
-            if (bulkDeleteFailures.isEmpty() == false) {
-                logUniqueFailureMessagesWithIndices(bulkDeleteFailures);
-                listener.onFailure(
-                    new ElasticsearchException(
-                        "Error updating synonyms: "
-                            + bulkDeleteFailures.stream().map(BulkItemResponse.Failure::getMessage).collect(Collectors.joining("\n"))
-                    )
+        // Read the set document to determine existence and capture seq_no for OCC flip
+        client.prepareGet(SYNONYMS_ALIAS_NAME, synonymSetId).execute(ActionListener.wrap(getResponse -> {
+            boolean created = getResponse.isExists() == false;
+            long seqNo = getResponse.isExists() ? getResponse.getSeqNo() : SequenceNumbers.UNASSIGNED_SEQ_NO;
+            long primaryTerm = getResponse.isExists() ? getResponse.getPrimaryTerm() : SequenceNumbers.UNASSIGNED_PRIMARY_TERM;
+            doGenerationWrite(synonymSetId, synonymsSet, refresh, created, seqNo, primaryTerm, listener);
+        }, e -> {
+            Throwable cause = ExceptionsHelper.unwrapCause(e);
+            if (cause instanceof IndexNotFoundException) {
+                doGenerationWrite(
+                    synonymSetId,
+                    synonymsSet,
+                    refresh,
+                    true,
+                    SequenceNumbers.UNASSIGNED_SEQ_NO,
+                    SequenceNumbers.UNASSIGNED_PRIMARY_TERM,
+                    listener
                 );
-                return;
+            } else {
+                listener.onFailure(e);
             }
-
-            // Insert as bulk requests
-            bulkUpdateSynonymsSet(
-                synonymSetId,
-                synonymsSet,
-                deleteByQueryResponseListener.delegateFailure((bulkInsertResponseListener, bulkInsertResponse) -> {
-                    if (bulkInsertResponse.hasFailures()) {
-                        logUniqueFailureMessagesWithIndices(
-                            Arrays.stream(bulkInsertResponse.getItems())
-                                .filter(BulkItemResponse::isFailed)
-                                .map(BulkItemResponse::getFailure)
-                                .collect(Collectors.toList())
-                        );
-                        bulkInsertResponseListener.onFailure(
-                            new ElasticsearchException("Error updating synonyms: " + bulkInsertResponse.buildFailureMessage())
-                        );
-                        return;
-                    }
-                    UpdateSynonymsResultStatus updateSynonymsResultStatus = created
-                        ? UpdateSynonymsResultStatus.CREATED
-                        : UpdateSynonymsResultStatus.UPDATED;
-
-                    checkIndexSearchableAndReloadAnalyzers(
-                        synonymSetId,
-                        refresh,
-                        false,
-                        updateSynonymsResultStatus,
-                        bulkInsertResponseListener
-                    );
-                })
-            );
         }));
     }
 
-    // Open for testing adding more synonyms set than the limit allows for
+    private void doGenerationWrite(
+        String synonymSetId,
+        SynonymRule[] synonymsSet,
+        boolean refresh,
+        boolean created,
+        long seqNo,
+        long primaryTerm,
+        ActionListener<SynonymsReloadResult> listener
+    ) {
+        String writeToken = UUIDs.base64UUID();
+        ActionListener<Void> afterBulkListener = listener.delegateFailure((l, ignored) -> {
+            // OCC flip the set document to activate the new generation
+            IndexRequest flipRequest;
+            try {
+                flipRequest = createSynonymSetIndexRequest(synonymSetId, writeToken);
+            } catch (IOException e) {
+                asyncDeleteOrphanedGeneration(synonymSetId, writeToken);
+                l.onFailure(e);
+                return;
+            }
+            if (created) {
+                flipRequest.opType(DocWriteRequest.OpType.CREATE);
+            } else {
+                flipRequest.setIfSeqNo(seqNo).setIfPrimaryTerm(primaryTerm);
+            }
+            flipRequest.setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE);
+            client.index(flipRequest, ActionListener.wrap(indexResponse -> {
+                UpdateSynonymsResultStatus status = created ? UpdateSynonymsResultStatus.CREATED : UpdateSynonymsResultStatus.UPDATED;
+                checkIndexSearchableAndReloadAnalyzers(
+                    synonymSetId,
+                    refresh,
+                    false,
+                    status,
+                    l.delegateFailure((reloadListener, reloadResult) -> {
+                        // Async cleanup of stale generations after reload — no added latency on reload path
+                        asyncDeleteStaleGenerations(synonymSetId, writeToken);
+                        reloadListener.onResponse(reloadResult);
+                    })
+                );
+            }, e -> {
+                asyncDeleteOrphanedGeneration(synonymSetId, writeToken);
+                l.onFailure(e);
+            }));
+        });
+
+        if (synonymsSet.length == 0) {
+            // No rules to bulk-index; skip directly to the flip step.
+            afterBulkListener.onResponse(null);
+        } else {
+            bulkInsertWithGeneration(synonymSetId, synonymsSet, writeToken, listener.delegateFailure((l, bulkResponse) -> {
+                if (bulkResponse.hasFailures()) {
+                    asyncDeleteOrphanedGeneration(synonymSetId, writeToken);
+                    logUniqueFailureMessagesWithIndices(
+                        Arrays.stream(bulkResponse.getItems())
+                            .filter(BulkItemResponse::isFailed)
+                            .map(BulkItemResponse::getFailure)
+                            .collect(Collectors.toList())
+                    );
+                    l.onFailure(new ElasticsearchException("Error updating synonyms: " + bulkResponse.buildFailureMessage()));
+                    return;
+                }
+                afterBulkListener.onResponse(null);
+            }));
+        }
+    }
+
+    private void bulkInsertWithGeneration(
+        String synonymSetId,
+        SynonymRule[] synonymsSet,
+        String writeToken,
+        ActionListener<BulkResponse> listener
+    ) {
+        BulkRequestBuilder bulkRequestBuilder = client.prepareBulk();
+        try {
+            for (SynonymRule synonymRule : synonymsSet) {
+                bulkRequestBuilder.add(createSynonymRuleIndexRequest(synonymSetId, synonymRule, writeToken));
+            }
+        } catch (IOException ex) {
+            listener.onFailure(ex);
+            return;
+        }
+        bulkRequestBuilder.setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE).execute(listener);
+    }
+
+    // Open for testing adding more synonyms set than the limit allows for.
+    // NOTE: This method bypasses generation tracking and is for testing only.
     void bulkUpdateSynonymsSet(String synonymSetId, SynonymRule[] synonymsSet, ActionListener<BulkResponse> listener) {
         BulkRequestBuilder bulkRequestBuilder = client.prepareBulk();
         try {
             // Insert synonym set object
-            bulkRequestBuilder.add(createSynonymSetIndexRequest(synonymSetId));
+            bulkRequestBuilder.add(createSynonymSetIndexRequest(synonymSetId, null));
             // Insert synonym rules
             for (SynonymRule synonymRule : synonymsSet) {
-                bulkRequestBuilder.add(createSynonymRuleIndexRequest(synonymSetId, synonymRule));
+                bulkRequestBuilder.add(createSynonymRuleIndexRequest(synonymSetId, synonymRule, null));
             }
         } catch (IOException ex) {
             listener.onFailure(ex);
@@ -506,48 +601,40 @@ public class SynonymsManagementAPIService {
         boolean refresh,
         ActionListener<SynonymsReloadResult> listener
     ) {
-        checkSynonymSetExists(synonymsSetId, listener.delegateFailureAndWrap((l1, obj) -> {
-            // Count synonym rules to check if we're at maximum
-            BoolQueryBuilder queryFilter = QueryBuilders.boolQuery()
-                .must(QueryBuilders.termQuery(SYNONYMS_SET_FIELD, synonymsSetId))
-                .filter(QueryBuilders.termQuery(OBJECT_TYPE_FIELD, SYNONYM_RULE_OBJECT_TYPE));
-            if (synonymRule.id() != null) {
-                // Remove the current synonym rule from the count, so we allow updating a rule at max capacity
-                queryFilter.mustNot(QueryBuilders.termQuery(SYNONYM_RULE_ID_FIELD, synonymRule.id()));
-            }
-            client.prepareSearch(SYNONYMS_ALIAS_NAME)
-                .setQuery(queryFilter)
-                .setSize(0)
-                .setPreference(Preference.LOCAL.type())
-                .setTrackTotalHits(true)
-                .execute(l1.delegateFailureAndWrap((searchListener, searchResponse) -> {
-                    long synonymsSetSize = searchResponse.getHits().getTotalHits().value();
-                    if (synonymsSetSize >= maxSynonymRules) {
-                        listener.onFailure(
-                            new IllegalArgumentException("The number of synonym rules in a synonyms set cannot exceed " + maxSynonymRules)
-                        );
-                    } else {
-                        indexSynonymRule(synonymsSetId, synonymRule, refresh, searchListener);
-                    }
-                }));
-        }));
-    }
-
-    private void indexSynonymRule(
-        String synonymsSetId,
-        SynonymRule synonymRule,
-        boolean refresh,
-        ActionListener<SynonymsReloadResult> listener
-    ) throws IOException {
-        IndexRequest indexRequest = createSynonymRuleIndexRequest(synonymsSetId, synonymRule).setRefreshPolicy(
-            WriteRequest.RefreshPolicy.IMMEDIATE
-        );
-        client.index(indexRequest, listener.delegateFailure((l2, indexResponse) -> {
-            UpdateSynonymsResultStatus updateStatus = indexResponse.status() == RestStatus.CREATED
-                ? UpdateSynonymsResultStatus.CREATED
-                : UpdateSynonymsResultStatus.UPDATED;
-
-            checkIndexSearchableAndReloadAnalyzers(synonymsSetId, refresh, false, updateStatus, l2);
+        checkSynonymSetExists(synonymsSetId, listener.delegateFailureAndWrap((l1, ignored) -> {
+            client.prepareGet(SYNONYMS_ALIAS_NAME, synonymsSetId).execute(l1.delegateFailureAndWrap((l2, getResponse) -> {
+                Object val = getResponse.isExists() ? getResponse.getSourceAsMap().get(CURRENT_GENERATION_FIELD) : null;
+                String currentGeneration = val instanceof String s ? s : null;
+                BoolQueryBuilder queryFilter = QueryBuilders.boolQuery()
+                    .must(QueryBuilders.termQuery(SYNONYMS_SET_FIELD, synonymsSetId))
+                    .filter(QueryBuilders.termQuery(OBJECT_TYPE_FIELD, SYNONYM_RULE_OBJECT_TYPE));
+                if (synonymRule.id() != null) {
+                    queryFilter.mustNot(QueryBuilders.termQuery(SYNONYM_RULE_ID_FIELD, synonymRule.id()));
+                }
+                client.prepareSearch(SYNONYMS_ALIAS_NAME)
+                    .setQuery(queryFilter)
+                    .setSize(0)
+                    .setPreference(Preference.LOCAL.type())
+                    .setTrackTotalHits(true)
+                    .execute(l2.delegateFailureAndWrap((l3, searchResponse) -> {
+                        if (searchResponse.getHits().getTotalHits().value() >= maxSynonymRules) {
+                            l3.onFailure(
+                                new IllegalArgumentException(
+                                    "The number of synonym rules in a synonyms set cannot exceed " + maxSynonymRules
+                                )
+                            );
+                            return;
+                        }
+                        IndexRequest indexRequest = createSynonymRuleIndexRequest(synonymsSetId, synonymRule, currentGeneration)
+                            .setRefreshPolicy(WriteRequest.RefreshPolicy.IMMEDIATE);
+                        client.index(indexRequest, l3.delegateFailure((l4, indexResponse) -> {
+                            UpdateSynonymsResultStatus updateStatus = indexResponse.status() == org.elasticsearch.rest.RestStatus.CREATED
+                                ? UpdateSynonymsResultStatus.CREATED
+                                : UpdateSynonymsResultStatus.UPDATED;
+                            checkIndexSearchableAndReloadAnalyzers(synonymsSetId, refresh, false, updateStatus, l4);
+                        }));
+                    }));
+            }));
         }));
     }
 
@@ -600,7 +687,8 @@ public class SynonymsManagementAPIService {
             }));
     }
 
-    private static IndexRequest createSynonymRuleIndexRequest(String synonymsSetId, SynonymRule synonymRule) throws IOException {
+    private static IndexRequest createSynonymRuleIndexRequest(String synonymsSetId, SynonymRule synonymRule, String generation)
+        throws IOException {
         try (XContentBuilder builder = XContentFactory.jsonBuilder()) {
             builder.startObject();
             {
@@ -608,6 +696,7 @@ public class SynonymsManagementAPIService {
                 builder.field(SYNONYM_RULE_ID_FIELD, synonymRule.id());
                 builder.field(SYNONYMS_FIELD, synonymRule.synonyms());
                 builder.field(OBJECT_TYPE_FIELD, SYNONYM_RULE_OBJECT_TYPE);
+                builder.field(GENERATION_FIELD, generation);
             }
             builder.endObject();
 
@@ -617,17 +706,58 @@ public class SynonymsManagementAPIService {
         }
     }
 
-    private static IndexRequest createSynonymSetIndexRequest(String synonymsSetId) throws IOException {
+    private static IndexRequest createSynonymSetIndexRequest(String synonymsSetId, String writeToken) throws IOException {
         try (XContentBuilder builder = XContentFactory.jsonBuilder()) {
             builder.startObject();
             {
                 builder.field(SYNONYMS_SET_FIELD, synonymsSetId);
                 builder.field(OBJECT_TYPE_FIELD, SYNONYM_SET_OBJECT_TYPE);
+                builder.field(CURRENT_GENERATION_FIELD, writeToken);
             }
             builder.endObject();
 
             return new IndexRequest(SYNONYMS_ALIAS_NAME).id(synonymsSetId).opType(DocWriteRequest.OpType.INDEX).source(builder);
         }
+    }
+
+    private void asyncDeleteStaleGenerations(String synonymSetId, String currentToken) {
+        DeleteByQueryRequest dbqRequest = new DeleteByQueryRequest(SYNONYMS_ALIAS_NAME).setQuery(
+            QueryBuilders.boolQuery()
+                .must(QueryBuilders.termQuery(SYNONYMS_SET_FIELD, synonymSetId))
+                .filter(QueryBuilders.termQuery(OBJECT_TYPE_FIELD, SYNONYM_RULE_OBJECT_TYPE))
+                .mustNot(QueryBuilders.termQuery(GENERATION_FIELD, currentToken))
+        ).setRefresh(false).setIndicesOptions(IndicesOptions.fromOptions(true, true, false, false));
+
+        client.execute(
+            DeleteByQueryAction.INSTANCE,
+            dbqRequest,
+            ActionListener.wrap(
+                r -> logger.debug("Cleaned up [{}] stale synonym rules for set [{}]", r.getDeleted(), synonymSetId),
+                e -> logger.warn("Failed to clean up stale synonym rules for set [{}]", synonymSetId, e)
+            )
+        );
+    }
+
+    private void asyncDeleteOrphanedGeneration(String synonymSetId, String orphanToken) {
+        DeleteByQueryRequest dbqRequest = new DeleteByQueryRequest(SYNONYMS_ALIAS_NAME).setQuery(
+            QueryBuilders.boolQuery()
+                .must(QueryBuilders.termQuery(SYNONYMS_SET_FIELD, synonymSetId))
+                .filter(QueryBuilders.termQuery(GENERATION_FIELD, orphanToken))
+        ).setRefresh(false).setIndicesOptions(IndicesOptions.fromOptions(true, true, false, false));
+
+        client.execute(
+            DeleteByQueryAction.INSTANCE,
+            dbqRequest,
+            ActionListener.wrap(
+                r -> logger.debug(
+                    "Cleaned up [{}] orphaned synonym rules for set [{}] token [{}]",
+                    r.getDeleted(),
+                    synonymSetId,
+                    orphanToken
+                ),
+                e -> logger.warn("Failed to clean up orphaned synonym rules for set [{}] token [{}]", synonymSetId, orphanToken, e)
+            )
+        );
     }
 
     private <T> void checkSynonymSetExists(String synonymsSetId, ActionListener<T> listener) {

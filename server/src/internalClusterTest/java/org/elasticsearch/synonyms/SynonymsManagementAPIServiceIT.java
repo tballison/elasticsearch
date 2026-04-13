@@ -422,4 +422,51 @@ public class SynonymsManagementAPIServiceIT extends ESIntegTestCase {
 
         putRuleNoRefreshLatch.await(5, TimeUnit.SECONDS);
     }
+
+    /**
+     * Verifies that a rule written by {@code putSynonymRule} is visible via {@code getSynonymSetRules},
+     * both for new rules (added to an existing set) and updates to existing rules.
+     * This exercises the generation-tagging path: the rule must be written with the set's
+     * current generation or it will be invisible to the generation-filtered read.
+     */
+    public void testPutSynonymRuleIsVisibleAfterWrite() throws Exception {
+        String synonymSetId = randomIdentifier();
+        int initialCount = randomIntBetween(1, 10);
+        SynonymRule[] initialRules = randomSynonymsSet(initialCount, initialCount);
+
+        PlainActionFuture<SynonymsManagementAPIService.SynonymsReloadResult> createFuture = new PlainActionFuture<>();
+        synonymsManagementAPIService.putSynonymsSet(synonymSetId, initialRules, false, createFuture);
+        assertEquals(SynonymsManagementAPIService.UpdateSynonymsResultStatus.CREATED, createFuture.actionGet().synonymsOperationResult());
+
+        // Add a brand-new rule — should be visible immediately
+        SynonymRule newRule = new SynonymRule(randomIdentifier(), "foo, bar");
+        PlainActionFuture<SynonymsManagementAPIService.SynonymsReloadResult> addFuture = new PlainActionFuture<>();
+        synonymsManagementAPIService.putSynonymRule(synonymSetId, newRule, false, addFuture);
+        assertEquals(SynonymsManagementAPIService.UpdateSynonymsResultStatus.CREATED, addFuture.actionGet().synonymsOperationResult());
+
+        PlainActionFuture<PagedResult<SynonymRule>> getFuture = new PlainActionFuture<>();
+        synonymsManagementAPIService.getSynonymSetRules(synonymSetId, getFuture);
+        PagedResult<SynonymRule> afterAdd = getFuture.actionGet();
+        assertEquals("new rule must be visible via getSynonymSetRules", initialCount + 1, afterAdd.pageResults().length);
+
+        // Update an existing rule — count must stay the same, synonyms must change
+        SynonymRule updatedRule = new SynonymRule(newRule.id(), "foo, bar, baz");
+        PlainActionFuture<SynonymsManagementAPIService.SynonymsReloadResult> updateFuture = new PlainActionFuture<>();
+        synonymsManagementAPIService.putSynonymRule(synonymSetId, updatedRule, false, updateFuture);
+        assertEquals(SynonymsManagementAPIService.UpdateSynonymsResultStatus.UPDATED, updateFuture.actionGet().synonymsOperationResult());
+
+        PlainActionFuture<PagedResult<SynonymRule>> getFuture2 = new PlainActionFuture<>();
+        synonymsManagementAPIService.getSynonymSetRules(synonymSetId, getFuture2);
+        PagedResult<SynonymRule> afterUpdate = getFuture2.actionGet();
+        assertEquals("rule count must not change after update", initialCount + 1, afterUpdate.pageResults().length);
+        boolean found = false;
+        for (SynonymRule rule : afterUpdate.pageResults()) {
+            if (updatedRule.id().equals(rule.id())) {
+                assertEquals("updated synonyms must be visible", updatedRule.synonyms(), rule.synonyms());
+                found = true;
+                break;
+            }
+        }
+        assertTrue("updated rule must be present in results", found);
+    }
 }
