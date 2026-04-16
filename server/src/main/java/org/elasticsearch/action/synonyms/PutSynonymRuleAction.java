@@ -12,8 +12,8 @@ package org.elasticsearch.action.synonyms;
 import org.elasticsearch.TransportVersion;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.ActionType;
-import org.elasticsearch.action.LegacyActionRequest;
 import org.elasticsearch.action.ValidateActions;
+import org.elasticsearch.action.support.master.MasterNodeRequest;
 import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
@@ -39,7 +39,7 @@ public class PutSynonymRuleAction extends ActionType<SynonymUpdateResponse> {
         super(NAME);
     }
 
-    public static class Request extends LegacyActionRequest {
+    public static class Request extends MasterNodeRequest<Request> {
 
         private static final TransportVersion SYNONYMS_REFRESH_PARAM = TransportVersion.fromName("synonyms_refresh_param");
 
@@ -71,6 +71,7 @@ public class PutSynonymRuleAction extends ActionType<SynonymUpdateResponse> {
 
         public Request(String synonymsSetId, String synonymRuleId, boolean refresh, BytesReference content, XContentType contentType)
             throws IOException {
+            super(INFINITE_MASTER_NODE_TIMEOUT);
             this.synonymsSetId = synonymsSetId;
             try (XContentParser parser = XContentHelper.createParser(XContentParserConfiguration.EMPTY, content, contentType)) {
                 this.synonymRule = PARSER.apply(parser, synonymRuleId);
@@ -81,6 +82,7 @@ public class PutSynonymRuleAction extends ActionType<SynonymUpdateResponse> {
         }
 
         Request(String synonymsSetId, SynonymRule synonymRule, boolean refresh) {
+            super(INFINITE_MASTER_NODE_TIMEOUT);
             this.synonymsSetId = synonymsSetId;
             this.synonymRule = synonymRule;
             this.refresh = refresh;

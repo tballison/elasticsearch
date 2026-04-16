@@ -13,6 +13,7 @@ import org.elasticsearch.action.synonyms.DeleteSynonymsAction;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestRequest;
+import org.elasticsearch.rest.RestUtils;
 import org.elasticsearch.rest.Scope;
 import org.elasticsearch.rest.ServerlessScope;
 import org.elasticsearch.rest.action.RestToXContentListener;
@@ -38,6 +39,7 @@ public class RestDeleteSynonymsAction extends BaseRestHandler {
     @Override
     protected RestChannelConsumer prepareRequest(RestRequest restRequest, NodeClient client) throws IOException {
         DeleteSynonymsAction.Request request = new DeleteSynonymsAction.Request(restRequest.param("synonymsSet"));
+        request.masterNodeTimeout(RestUtils.getMasterNodeTimeout(restRequest));
         return channel -> client.execute(DeleteSynonymsAction.INSTANCE, request, new RestToXContentListener<>(channel));
     }
 }

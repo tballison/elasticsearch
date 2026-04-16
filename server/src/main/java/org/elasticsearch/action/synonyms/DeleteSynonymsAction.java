@@ -12,8 +12,8 @@ package org.elasticsearch.action.synonyms;
 import org.apache.logging.log4j.util.Strings;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.ActionType;
-import org.elasticsearch.action.LegacyActionRequest;
 import org.elasticsearch.action.support.master.AcknowledgedResponse;
+import org.elasticsearch.action.support.master.MasterNodeRequest;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 
@@ -29,7 +29,7 @@ public class DeleteSynonymsAction extends ActionType<AcknowledgedResponse> {
         super(NAME);
     }
 
-    public static class Request extends LegacyActionRequest {
+    public static class Request extends MasterNodeRequest<Request> {
         private final String synonymsSetId;
 
         public Request(StreamInput in) throws IOException {
@@ -38,6 +38,7 @@ public class DeleteSynonymsAction extends ActionType<AcknowledgedResponse> {
         }
 
         public Request(String synonymsSetId) {
+            super(INFINITE_MASTER_NODE_TIMEOUT);
             if (Strings.isBlank(synonymsSetId)) {
                 throw new IllegalArgumentException("Synonym set ID cannot be null or blank");
             }

@@ -14,6 +14,7 @@ import org.elasticsearch.action.synonyms.SynonymUpdateResponse;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestRequest;
+import org.elasticsearch.rest.RestUtils;
 import org.elasticsearch.rest.Scope;
 import org.elasticsearch.rest.ServerlessScope;
 import org.elasticsearch.rest.action.RestToXContentListener;
@@ -45,6 +46,7 @@ public class RestPutSynonymsAction extends BaseRestHandler {
             restRequest.content(),
             restRequest.getXContentType()
         );
+        request.masterNodeTimeout(RestUtils.getMasterNodeTimeout(restRequest));
         return channel -> client.execute(
             PutSynonymsAction.INSTANCE,
             request,

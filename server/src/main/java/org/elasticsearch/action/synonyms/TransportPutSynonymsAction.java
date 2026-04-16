@@ -11,32 +11,66 @@ package org.elasticsearch.action.synonyms;
 
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.ActionFilters;
-import org.elasticsearch.action.support.HandledTransportAction;
+import org.elasticsearch.action.support.master.TransportMasterNodeAction;
 import org.elasticsearch.client.internal.Client;
+import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.block.ClusterBlockException;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.injection.guice.Inject;
+import org.elasticsearch.synonyms.SynonymSequencer;
 import org.elasticsearch.synonyms.SynonymsManagementAPIService;
 import org.elasticsearch.tasks.Task;
+import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
 
-public class TransportPutSynonymsAction extends HandledTransportAction<PutSynonymsAction.Request, SynonymUpdateResponse> {
+public class TransportPutSynonymsAction extends TransportMasterNodeAction<PutSynonymsAction.Request, SynonymUpdateResponse> {
 
     private final SynonymsManagementAPIService synonymsManagementAPIService;
+    private final SynonymSequencer sequencer;
 
     @Inject
-    public TransportPutSynonymsAction(TransportService transportService, ActionFilters actionFilters, Client client) {
-        super(PutSynonymsAction.NAME, transportService, actionFilters, PutSynonymsAction.Request::new, EsExecutors.DIRECT_EXECUTOR_SERVICE);
-
+    public TransportPutSynonymsAction(
+        TransportService transportService,
+        ClusterService clusterService,
+        ThreadPool threadPool,
+        ActionFilters actionFilters,
+        Client client,
+        SynonymSequencer sequencer
+    ) {
+        super(
+            PutSynonymsAction.NAME,
+            transportService,
+            clusterService,
+            threadPool,
+            actionFilters,
+            PutSynonymsAction.Request::new,
+            SynonymUpdateResponse::new,
+            EsExecutors.DIRECT_EXECUTOR_SERVICE
+        );
         this.synonymsManagementAPIService = new SynonymsManagementAPIService(client);
+        this.sequencer = sequencer;
     }
 
     @Override
-    protected void doExecute(Task task, PutSynonymsAction.Request request, ActionListener<SynonymUpdateResponse> listener) {
-        synonymsManagementAPIService.putSynonymsSet(
-            request.synonymsSetId(),
-            request.synonymRules(),
-            request.refresh(),
-            listener.map(SynonymUpdateResponse::new)
+    protected void masterOperation(
+        Task task,
+        PutSynonymsAction.Request request,
+        ClusterState state,
+        ActionListener<SynonymUpdateResponse> listener
+    ) {
+        sequencer.submit(
+            () -> synonymsManagementAPIService.putSynonymsSet(
+                request.synonymsSetId(),
+                request.synonymRules(),
+                request.refresh(),
+                sequencer.wrap(listener.map(SynonymUpdateResponse::new))
+            )
         );
+    }
+
+    @Override
+    protected ClusterBlockException checkBlock(PutSynonymsAction.Request request, ClusterState state) {
+        return null;
     }
 }

@@ -13,6 +13,7 @@ import org.elasticsearch.action.synonyms.DeleteSynonymRuleAction;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestRequest;
+import org.elasticsearch.rest.RestUtils;
 import org.elasticsearch.rest.Scope;
 import org.elasticsearch.rest.ServerlessScope;
 import org.elasticsearch.rest.action.RestToXContentListener;
@@ -43,6 +44,7 @@ public class RestDeleteSynonymRuleAction extends BaseRestHandler {
             restRequest.param("synonymRuleId"),
             restRequest.paramAsBoolean("refresh", true)
         );
+        request.masterNodeTimeout(RestUtils.getMasterNodeTimeout(restRequest));
         return channel -> client.execute(DeleteSynonymRuleAction.INSTANCE, request, new RestToXContentListener<>(channel));
     }
 

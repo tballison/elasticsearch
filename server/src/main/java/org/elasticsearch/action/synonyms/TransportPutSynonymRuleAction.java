@@ -11,38 +11,66 @@ package org.elasticsearch.action.synonyms;
 
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.ActionFilters;
-import org.elasticsearch.action.support.HandledTransportAction;
+import org.elasticsearch.action.support.master.TransportMasterNodeAction;
 import org.elasticsearch.client.internal.Client;
+import org.elasticsearch.cluster.ClusterState;
+import org.elasticsearch.cluster.block.ClusterBlockException;
+import org.elasticsearch.cluster.service.ClusterService;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.injection.guice.Inject;
+import org.elasticsearch.synonyms.SynonymSequencer;
 import org.elasticsearch.synonyms.SynonymsManagementAPIService;
 import org.elasticsearch.tasks.Task;
+import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
 
-public class TransportPutSynonymRuleAction extends HandledTransportAction<PutSynonymRuleAction.Request, SynonymUpdateResponse> {
+public class TransportPutSynonymRuleAction extends TransportMasterNodeAction<PutSynonymRuleAction.Request, SynonymUpdateResponse> {
 
     private final SynonymsManagementAPIService synonymsManagementAPIService;
+    private final SynonymSequencer sequencer;
 
     @Inject
-    public TransportPutSynonymRuleAction(TransportService transportService, ActionFilters actionFilters, Client client) {
+    public TransportPutSynonymRuleAction(
+        TransportService transportService,
+        ClusterService clusterService,
+        ThreadPool threadPool,
+        ActionFilters actionFilters,
+        Client client,
+        SynonymSequencer sequencer
+    ) {
         super(
             PutSynonymRuleAction.NAME,
             transportService,
+            clusterService,
+            threadPool,
             actionFilters,
             PutSynonymRuleAction.Request::new,
+            SynonymUpdateResponse::new,
             EsExecutors.DIRECT_EXECUTOR_SERVICE
         );
-
         this.synonymsManagementAPIService = new SynonymsManagementAPIService(client);
+        this.sequencer = sequencer;
     }
 
     @Override
-    protected void doExecute(Task task, PutSynonymRuleAction.Request request, ActionListener<SynonymUpdateResponse> listener) {
-        synonymsManagementAPIService.putSynonymRule(
-            request.synonymsSetId(),
-            request.synonymRule(),
-            request.refresh(),
-            listener.map(SynonymUpdateResponse::new)
+    protected void masterOperation(
+        Task task,
+        PutSynonymRuleAction.Request request,
+        ClusterState state,
+        ActionListener<SynonymUpdateResponse> listener
+    ) {
+        sequencer.submit(
+            () -> synonymsManagementAPIService.putSynonymRule(
+                request.synonymsSetId(),
+                request.synonymRule(),
+                request.refresh(),
+                sequencer.wrap(listener.map(SynonymUpdateResponse::new))
+            )
         );
+    }
+
+    @Override
+    protected ClusterBlockException checkBlock(PutSynonymRuleAction.Request request, ClusterState state) {
+        return null;
     }
 }

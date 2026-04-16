@@ -408,6 +408,7 @@ import org.elasticsearch.rest.action.synonyms.RestGetSynonymsAction;
 import org.elasticsearch.rest.action.synonyms.RestGetSynonymsSetsAction;
 import org.elasticsearch.rest.action.synonyms.RestPutSynonymRuleAction;
 import org.elasticsearch.rest.action.synonyms.RestPutSynonymsAction;
+import org.elasticsearch.synonyms.SynonymSequencer;
 import org.elasticsearch.search.crossproject.CrossProjectModeDecider;
 import org.elasticsearch.search.fetch.chunk.ActiveFetchPhaseTasks;
 import org.elasticsearch.search.fetch.chunk.TransportFetchPhaseCoordinationAction;
@@ -1063,6 +1064,7 @@ public class ActionModule extends AbstractModule {
         bind(AutoCreateIndex.class).toInstance(autoCreateIndex);
         bind(ActiveFetchPhaseTasks.class).asEagerSingleton();
         bind(TransportFetchPhaseResponseChunkAction.class).asEagerSingleton();
+        bind(SynonymSequencer.class).asEagerSingleton();
 
         // register ActionType -> transportAction Map used by NodeClient
         @SuppressWarnings("rawtypes")
