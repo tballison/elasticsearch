@@ -13,16 +13,21 @@ import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.client.internal.Client;
 import org.elasticsearch.client.internal.RemoteClusterClient;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
+import org.elasticsearch.logging.LogManager;
+import org.elasticsearch.logging.Logger;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.RemoteClusterService;
 
 import java.util.Objects;
+import java.util.concurrent.ThreadPoolExecutor;
 
 import static org.elasticsearch.threadpool.ThreadPool.Names.SEARCH_COORDINATION;
 
 public abstract class QueryRewriteRemoteAsyncAction<T, U extends QueryRewriteRemoteAsyncAction<T, U>> extends QueryRewriteAsyncAction<
     T,
     U> {
+
+    private static final Logger logger = LogManager.getLogger(QueryRewriteRemoteAsyncAction.class);
 
     private final String clusterAlias;
 
@@ -37,6 +42,16 @@ public abstract class QueryRewriteRemoteAsyncAction<T, U extends QueryRewriteRem
     @Override
     protected final void execute(Client client, ActionListener<T> listener) {
         ThreadPool threadPool = client.threadPool();
+        var scEx = threadPool.executor(SEARCH_COORDINATION);
+        if (scEx instanceof ThreadPoolExecutor tpe) {
+            logger.warn(
+                "[CCS-DIAG] SC before remote-async cluster={} active={} queue={} thread={}",
+                clusterAlias,
+                tpe.getActiveCount(),
+                tpe.getQueue().size(),
+                Thread.currentThread().getName()
+            );
+        }
         RemoteClusterClient remoteClient = client.getRemoteClusterClient(
             clusterAlias,
             threadPool.executor(SEARCH_COORDINATION),

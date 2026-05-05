@@ -34,6 +34,8 @@ import org.elasticsearch.inference.InferenceServiceResults;
 import org.elasticsearch.inference.InferenceStringGroup;
 import org.elasticsearch.inference.InputType;
 import org.elasticsearch.inference.TaskType;
+import org.elasticsearch.logging.LogManager;
+import org.elasticsearch.logging.Logger;
 import org.elasticsearch.xpack.core.inference.action.EmbeddingAction;
 import org.elasticsearch.xpack.core.inference.action.GetInferenceFieldsInternalAction;
 import org.elasticsearch.xpack.core.inference.action.GetInferenceModelAction;
@@ -61,6 +63,8 @@ import static org.elasticsearch.xpack.core.inference.action.BaseInferenceActionR
 import static org.elasticsearch.xpack.core.inference.action.GetInferenceFieldsInternalAction.GET_INFERENCE_FIELDS_ACTION_AS_INDICES_ACTION_TV;
 
 public final class InferenceQueryUtils {
+    private static final Logger logger = LogManager.getLogger(InferenceQueryUtils.class);
+
     /**
      * <p>
      * Inference info aggregated across queried local and remote indices.
@@ -684,6 +688,13 @@ public final class InferenceQueryUtils {
             ActionListener<Map<String, Tuple<GetInferenceFieldsInternalAction.Response, TransportVersion>>> listener
         ) {
             final String clusterAlias = getClusterAlias();
+            logger.warn(
+                "[CCS-DIAG] inference-remote-start cluster={} fields={} thread={}",
+                clusterAlias,
+                request.fields(),
+                Thread.currentThread().getName()
+            );
+            final long startNanos = System.nanoTime();
             client.getConnection(request, listener.delegateFailureAndWrap((l1, connection) -> {
                 TransportVersion transportVersion = connection.getTransportVersion();
                 if (transportVersion.supports(GET_INFERENCE_FIELDS_ACTION_AS_INDICES_ACTION_TV) == false) {
@@ -703,6 +714,12 @@ public final class InferenceQueryUtils {
                         GetInferenceFieldsInternalAction.REMOTE_TYPE,
                         request,
                         l1.delegateFailureAndWrap((l2, resp) -> {
+                            logger.warn(
+                                "[CCS-DIAG] inference-remote-resp cluster={} elapsed={}ms thread={}",
+                                clusterAlias,
+                                (System.nanoTime() - startNanos) / 1_000_000L,
+                                Thread.currentThread().getName()
+                            );
                             l2.onResponse(Map.of(clusterAlias, Tuple.tuple(resp, transportVersion)));
                         })
                     );
