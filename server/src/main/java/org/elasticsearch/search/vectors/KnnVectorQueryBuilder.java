@@ -58,7 +58,7 @@ import static org.elasticsearch.xcontent.ConstructingObjectParser.optionalConstr
  * A query that performs kNN search using Lucene's {@link org.apache.lucene.search.KnnFloatVectorQuery} or
  * {@link org.apache.lucene.search.KnnByteVectorQuery}.
  */
-public class KnnVectorQueryBuilder extends LeafQueryBuilder<KnnVectorQueryBuilder> {
+public class KnnVectorQueryBuilder extends LeafQueryBuilder<KnnVectorQueryBuilder> implements KnnSearchQuery {
 
     public static final TransportVersion AUTO_PREFILTERING = TransportVersion.fromName("knn_vector_query_auto_prefiltering");
 

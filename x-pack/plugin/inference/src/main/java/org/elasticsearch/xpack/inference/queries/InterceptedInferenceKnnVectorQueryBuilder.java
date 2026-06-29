@@ -27,9 +27,11 @@ import org.elasticsearch.inference.InferenceStringGroup;
 import org.elasticsearch.inference.MinimalServiceSettings;
 import org.elasticsearch.inference.TaskType;
 import org.elasticsearch.plugins.internal.rewriter.QueryRewriteInterceptor;
+import org.elasticsearch.search.vectors.KnnSearchQuery;
 import org.elasticsearch.search.vectors.KnnVectorQueryBuilder;
 import org.elasticsearch.search.vectors.QueryVectorBuilder;
 import org.elasticsearch.search.vectors.QueryVectorBuilderAsyncAction;
+import org.elasticsearch.search.vectors.RescoreVectorBuilder;
 import org.elasticsearch.search.vectors.VectorData;
 import org.elasticsearch.xcontent.XContentBuilder;
 import org.elasticsearch.xpack.core.ml.inference.results.MlDenseEmbeddingResults;
@@ -44,7 +46,9 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
-public class InterceptedInferenceKnnVectorQueryBuilder extends InterceptedInferenceQueryBuilder<KnnVectorQueryBuilder> {
+public class InterceptedInferenceKnnVectorQueryBuilder extends InterceptedInferenceQueryBuilder<KnnVectorQueryBuilder>
+    implements
+        KnnSearchQuery {
     public static final String NAME = "intercepted_inference_knn";
 
     @SuppressWarnings("deprecation")
@@ -335,6 +339,51 @@ public class InterceptedInferenceKnnVectorQueryBuilder extends InterceptedInfere
 
     private String getField() {
         return originalQuery.getFieldName();
+    }
+
+    @Override
+    public String getFieldName() {
+        return originalQuery.getFieldName();
+    }
+
+    @Override
+    public VectorData queryVector() {
+        return originalQuery.queryVector();
+    }
+
+    @Override
+    public QueryVectorBuilder queryVectorBuilder() {
+        return originalQuery.queryVectorBuilder();
+    }
+
+    @Override
+    public Integer k() {
+        return originalQuery.k();
+    }
+
+    @Override
+    public Integer numCands() {
+        return originalQuery.numCands();
+    }
+
+    @Override
+    public Float visitPercentage() {
+        return originalQuery.visitPercentage();
+    }
+
+    @Override
+    public Float getVectorSimilarity() {
+        return originalQuery.getVectorSimilarity();
+    }
+
+    @Override
+    public RescoreVectorBuilder rescoreVectorBuilder() {
+        return originalQuery.rescoreVectorBuilder();
+    }
+
+    @Override
+    public List<QueryBuilder> filterQueries() {
+        return originalQuery.filterQueries();
     }
 
     private QueryBuilder querySemanticField(String clusterAlias, SemanticFieldMapper.SemanticFieldType semanticFieldType) {
