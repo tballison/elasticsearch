@@ -187,6 +187,18 @@ public class KnnVectorQueryBuilder extends LeafQueryBuilder<KnnVectorQueryBuilde
 
     public KnnVectorQueryBuilder(
         String fieldName,
+        QueryVectorBuilder queryVectorBuilder,
+        Integer k,
+        Integer numCands,
+        Float visitPercentage,
+        RescoreVectorBuilder rescoreVectorBuilder,
+        Float vectorSimilarity
+    ) {
+        this(fieldName, null, queryVectorBuilder, null, k, numCands, visitPercentage, rescoreVectorBuilder, vectorSimilarity);
+    }
+
+    public KnnVectorQueryBuilder(
+        String fieldName,
         byte[] queryVector,
         Integer k,
         Integer numCands,

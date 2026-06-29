@@ -189,7 +189,16 @@ public class DfsPhase {
 
         SearchExecutionContext searchExecutionContext = context.getSearchExecutionContext();
         List<KnnSearchBuilder> knnSearch = source.knnSearch();
-        List<KnnVectorQueryBuilder> knnVectorQueryBuilders = knnSearch.stream().map(KnnSearchBuilder::toQueryBuilder).toList();
+        // KnnSearchBuilder.toQueryBuilder() returns a QueryBuilder (widened in the wrap-an-inner refactor).
+        // Today the inner is always a KnnVectorQueryBuilder when it reaches DFS: intercepted forms (e.g. for a
+        // semantic_text field) are not yet handled and will surface here as a ClassCastException. The follow-up
+        // SearchSourceBuilder.rewrite() promotion of intercepted kNN-section items to subSearchSourceBuilders
+        // will route intercepted shapes out of this code path entirely; once that lands the explicit cast below
+        // can be removed.
+        List<KnnVectorQueryBuilder> knnVectorQueryBuilders = knnSearch.stream()
+            .map(KnnSearchBuilder::toQueryBuilder)
+            .map(KnnVectorQueryBuilder.class::cast)
+            .toList();
         // Since we apply boost during the DfsQueryPhase, we should not apply boost here:
         knnVectorQueryBuilders.forEach(knnVectorQueryBuilder -> knnVectorQueryBuilder.boost(DEFAULT_BOOST));
 

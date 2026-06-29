@@ -9,7 +9,6 @@
 
 package org.elasticsearch.search.vectors;
 
-import org.apache.lucene.util.SetOnce;
 import org.elasticsearch.TransportVersion;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
@@ -30,7 +29,6 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.function.Supplier;
 
 import static org.elasticsearch.common.Strings.format;
 import static org.elasticsearch.index.query.AbstractQueryBuilder.DEFAULT_BOOST;
@@ -39,7 +37,22 @@ import static org.elasticsearch.xcontent.ConstructingObjectParser.constructorArg
 import static org.elasticsearch.xcontent.ConstructingObjectParser.optionalConstructorArg;
 
 /**
- * Defines a kNN search to run in the search request.
+ * Defines a kNN search to run in the top-level {@code knn} section of a search request.
+ *
+ * <p>This class is a thin envelope around an inner {@link QueryBuilder} that holds all of the kNN search state
+ * (field, query vector, k, num_candidates, similarity, filters, boost, queryName, rescore vector). The inner is
+ * constructed as a {@link KnnVectorQueryBuilder} in every public entry point. Delegating the rewrite to the inner
+ * routes through {@link AbstractQueryBuilder#rewrite}, which is the entry point of the
+ * {@code QueryRewriteInterceptor} framework — so the knn section participates in interception (e.g. for
+ * {@code semantic_text} fields) the same way the {@code knn} query does. The envelope keeps only what the inner
+ * does not model: {@link #innerHitBuilder}.
+ *
+ * <p>Read accessors and setters on the envelope delegate to the inner via {@link KnnSearchQuery}. They throw
+ * {@link IllegalStateException} if the inner has been rewritten to a form that is not a {@code KnnSearchQuery}
+ * (for example, an intercepted wrapper, a nested wrapper around an intercepted kNN, or {@code MatchNoneQueryBuilder}).
+ * Such a state is only reachable on the coordinator after rewrite has begun; the search source machinery is
+ * expected to extract intercepted kNN section entries to {@code subSearchSourceBuilders} before the rewritten
+ * envelope reaches an accessor or the wire.
  */
 public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewriteable<KnnSearchBuilder> {
     public static final int NUM_CANDS_LIMIT = 10_000;
@@ -116,19 +129,8 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
 
     private static final TransportVersion VISIT_PERCENTAGE = TransportVersion.fromName("visit_percentage");
 
-    final String field;
-    final VectorData queryVector;
-    final QueryVectorBuilder queryVectorBuilder;
-    private final Supplier<float[]> querySupplier;
-    final int k;
-    final int numCands;
-    final Float visitPercentage;
-    final Float similarity;
-    final List<QueryBuilder> filterQueries;
-    String queryName;
-    float boost = DEFAULT_BOOST;
+    private final QueryBuilder innerQuery;
     InnerHitBuilder innerHitBuilder;
-    private final RescoreVectorBuilder rescoreVectorBuilder;
 
     /**
      * Defines a kNN search.
@@ -149,16 +151,7 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
         RescoreVectorBuilder rescoreVectorBuilder,
         Float similarity
     ) {
-        this(
-            field,
-            Objects.requireNonNull(VectorData.fromFloats(queryVector), format("[%s] cannot be null", QUERY_VECTOR_FIELD)),
-            null,
-            k,
-            numCands,
-            visitPercentage,
-            rescoreVectorBuilder,
-            similarity
-        );
+        this(new KnnVectorQueryBuilder(field, queryVector, k, numCands, visitPercentage, rescoreVectorBuilder, similarity), null);
     }
 
     /**
@@ -179,7 +172,7 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
         RescoreVectorBuilder rescoreVectorBuilder,
         Float similarity
     ) {
-        this(field, queryVector, null, k, numCands, visitPercentage, rescoreVectorBuilder, similarity);
+        this(new KnnVectorQueryBuilder(field, queryVector, k, numCands, visitPercentage, rescoreVectorBuilder, similarity), null);
     }
 
     /**
@@ -201,14 +194,16 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
         Float similarity
     ) {
         this(
-            field,
-            null,
-            Objects.requireNonNull(queryVectorBuilder, format("[%s] cannot be null", QUERY_VECTOR_BUILDER_FIELD.getPreferredName())),
-            k,
-            numCands,
-            visitPercentage,
-            rescoreVectorBuilder,
-            similarity
+            new KnnVectorQueryBuilder(
+                field,
+                Objects.requireNonNull(queryVectorBuilder, format("[%s] cannot be null", QUERY_VECTOR_BUILDER_FIELD.getPreferredName())),
+                k,
+                numCands,
+                visitPercentage,
+                rescoreVectorBuilder,
+                similarity
+            ),
+            null
         );
     }
 
@@ -222,81 +217,19 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
         RescoreVectorBuilder rescoreVectorBuilder,
         Float similarity
     ) {
-        this(
-            field,
-            queryVectorBuilder,
-            queryVector,
-            new ArrayList<>(),
-            k,
-            numCands,
-            visitPercentage,
-            rescoreVectorBuilder,
-            similarity,
-            null,
-            null,
-            DEFAULT_BOOST
-        );
+        this(buildInner(field, queryVector, queryVectorBuilder, k, numCands, visitPercentage, rescoreVectorBuilder, similarity), null);
     }
 
-    private KnnSearchBuilder(
+    private static KnnVectorQueryBuilder buildInner(
         String field,
-        Supplier<float[]> querySupplier,
-        Integer k,
-        Integer numCands,
+        VectorData queryVector,
+        QueryVectorBuilder queryVectorBuilder,
+        int k,
+        int numCands,
         Float visitPercentage,
         RescoreVectorBuilder rescoreVectorBuilder,
-        List<QueryBuilder> filterQueries,
         Float similarity
     ) {
-        this.field = field;
-        this.queryVector = VectorData.fromFloats(new float[0]);
-        this.queryVectorBuilder = null;
-        this.k = k;
-        this.numCands = numCands;
-        this.visitPercentage = visitPercentage;
-        this.filterQueries = filterQueries;
-        this.querySupplier = querySupplier;
-        this.similarity = similarity;
-        this.rescoreVectorBuilder = rescoreVectorBuilder;
-    }
-
-    private KnnSearchBuilder(
-        String field,
-        QueryVectorBuilder queryVectorBuilder,
-        VectorData queryVector,
-        List<QueryBuilder> filterQueries,
-        int k,
-        int numCandidates,
-        Float visitPercentage,
-        RescoreVectorBuilder rescoreVectorBuilder,
-        Float similarity,
-        InnerHitBuilder innerHitBuilder,
-        String queryName,
-        float boost
-    ) {
-        if (k < 1) {
-            throw new IllegalArgumentException("[" + K_FIELD.getPreferredName() + "] must be greater than 0");
-        }
-        if (numCandidates < k) {
-            throw new IllegalArgumentException(
-                "[" + NUM_CANDS_FIELD.getPreferredName() + "] cannot be less than " + "[" + K_FIELD.getPreferredName() + "]"
-            );
-        }
-        if (numCandidates > NUM_CANDS_LIMIT) {
-            throw new IllegalArgumentException("[" + NUM_CANDS_FIELD.getPreferredName() + "] cannot exceed [" + NUM_CANDS_LIMIT + "]");
-        }
-        if (visitPercentage != null && (visitPercentage < 0.0f || visitPercentage > 100.0f)) {
-            throw new IllegalArgumentException("[" + VISIT_PERCENTAGE_FIELD.getPreferredName() + "] must be between 0 and 100");
-        }
-        if (queryVector == null && queryVectorBuilder == null) {
-            throw new IllegalArgumentException(
-                format(
-                    "either [%s] or [%s] must be provided",
-                    QUERY_VECTOR_BUILDER_FIELD.getPreferredName(),
-                    QUERY_VECTOR_FIELD.getPreferredName()
-                )
-            );
-        }
         if (queryVector != null && queryVectorBuilder != null) {
             throw new IllegalArgumentException(
                 format(
@@ -306,83 +239,116 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
                 )
             );
         }
-        this.field = field;
-        this.queryVector = queryVector == null ? VectorData.fromFloats(new float[0]) : queryVector;
-        this.queryVectorBuilder = queryVectorBuilder;
-        this.k = k;
-        this.numCands = numCandidates;
-        this.visitPercentage = visitPercentage;
-        this.rescoreVectorBuilder = rescoreVectorBuilder;
+        if (queryVectorBuilder != null) {
+            return new KnnVectorQueryBuilder(field, queryVectorBuilder, k, numCands, visitPercentage, rescoreVectorBuilder, similarity);
+        }
+        return new KnnVectorQueryBuilder(field, queryVector, k, numCands, visitPercentage, rescoreVectorBuilder, similarity);
+    }
+
+    private KnnSearchBuilder(QueryBuilder innerQuery, InnerHitBuilder innerHitBuilder) {
+        this.innerQuery = Objects.requireNonNull(innerQuery);
         this.innerHitBuilder = innerHitBuilder;
-        this.similarity = similarity;
-        this.queryName = queryName;
-        this.boost = boost;
-        this.filterQueries = filterQueries;
-        this.querySupplier = null;
     }
 
     public KnnSearchBuilder(StreamInput in) throws IOException {
-        this.field = in.readString();
-        this.k = in.readVInt();
-        this.numCands = in.readVInt();
-        if (in.getTransportVersion().supports(VISIT_PERCENTAGE)) {
-            this.visitPercentage = in.readOptionalFloat();
-        } else {
-            this.visitPercentage = null;
-        }
-        this.queryVector = in.readOptionalWriteable(VectorData::new);
-        this.filterQueries = in.readNamedWriteableCollectionAsList(QueryBuilder.class);
-        this.boost = in.readFloat();
-        this.queryName = in.readOptionalString();
-        this.queryVectorBuilder = in.readOptionalNamedWriteable(QueryVectorBuilder.class);
-        this.querySupplier = null;
-        this.similarity = in.readOptionalFloat();
+        String field = in.readString();
+        int k = in.readVInt();
+        int numCands = in.readVInt();
+        Float visitPercentage = in.getTransportVersion().supports(VISIT_PERCENTAGE) ? in.readOptionalFloat() : null;
+        VectorData queryVector = in.readOptionalWriteable(VectorData::new);
+        List<QueryBuilder> filterQueries = in.readNamedWriteableCollectionAsList(QueryBuilder.class);
+        float boost = in.readFloat();
+        String queryName = in.readOptionalString();
+        QueryVectorBuilder queryVectorBuilder = in.readOptionalNamedWriteable(QueryVectorBuilder.class);
+        Float similarity = in.readOptionalFloat();
         this.innerHitBuilder = in.readOptionalWriteable(InnerHitBuilder::new);
-        this.rescoreVectorBuilder = in.readOptional(RescoreVectorBuilder::new);
+        RescoreVectorBuilder rescoreVectorBuilder = in.readOptional(RescoreVectorBuilder::new);
+
+        KnnVectorQueryBuilder inner = queryVectorBuilder != null
+            ? new KnnVectorQueryBuilder(field, queryVectorBuilder, k, numCands, visitPercentage, rescoreVectorBuilder, similarity)
+            : new KnnVectorQueryBuilder(field, queryVector, k, numCands, visitPercentage, rescoreVectorBuilder, similarity);
+        inner.boost(boost).queryName(queryName).addFilterQueries(filterQueries);
+        this.innerQuery = inner;
+    }
+
+    /**
+     * Returns the inner query that holds the kNN search state. After {@link #rewrite}, this can be any
+     * {@link QueryBuilder} (for example, the intercepted form when the field is a {@code semantic_text}). Pre-rewrite
+     * and on the only-non-semantic path it is always a {@link KnnVectorQueryBuilder}.
+     */
+    public QueryBuilder toQueryBuilder() {
+        return innerQuery;
+    }
+
+    /**
+     * Cast the inner to {@link KnnSearchQuery} for accessor delegation. Pre-rewrite (and post-rewrite for
+     * non-intercepted kNN sections) the inner is always a {@link KnnVectorQueryBuilder} and therefore a
+     * {@code KnnSearchQuery}.
+     */
+    private KnnSearchQuery asKnnSearchQuery() {
+        if (innerQuery instanceof KnnSearchQuery knnSearchQuery) {
+            return knnSearchQuery;
+        }
+        throw new IllegalStateException(
+            "kNN section accessor invoked on rewritten inner of type [" + innerQuery.getClass().getSimpleName() + "]"
+        );
+    }
+
+    private KnnVectorQueryBuilder asKnnVectorQueryBuilder() {
+        if (innerQuery instanceof KnnVectorQueryBuilder knnVectorQueryBuilder) {
+            return knnVectorQueryBuilder;
+        }
+        throw new IllegalStateException(
+            "kNN section mutator invoked on rewritten inner of type [" + innerQuery.getClass().getSimpleName() + "]"
+        );
     }
 
     public int k() {
-        return k;
+        return asKnnSearchQuery().k();
     }
 
     public int getNumCands() {
-        return numCands;
+        return asKnnSearchQuery().numCands();
     }
 
     public Float getVisitPercentage() {
-        return visitPercentage;
+        return asKnnSearchQuery().visitPercentage();
     }
 
     public RescoreVectorBuilder getRescoreVectorBuilder() {
-        return rescoreVectorBuilder;
+        return asKnnSearchQuery().rescoreVectorBuilder();
     }
 
     public QueryVectorBuilder getQueryVectorBuilder() {
-        return queryVectorBuilder;
+        return asKnnSearchQuery().queryVectorBuilder();
     }
 
     // for testing only
     public VectorData getQueryVector() {
-        return queryVector;
+        return asKnnSearchQuery().queryVector();
     }
 
     public String getField() {
-        return field;
+        return asKnnSearchQuery().getFieldName();
     }
 
     public List<QueryBuilder> getFilterQueries() {
-        return filterQueries;
+        return asKnnSearchQuery().filterQueries();
+    }
+
+    public Float getSimilarity() {
+        return asKnnSearchQuery().getVectorSimilarity();
     }
 
     public KnnSearchBuilder addFilterQuery(QueryBuilder filterQuery) {
         Objects.requireNonNull(filterQuery);
-        this.filterQueries.add(filterQuery);
+        asKnnVectorQueryBuilder().addFilterQuery(filterQuery);
         return this;
     }
 
     public KnnSearchBuilder addFilterQueries(List<QueryBuilder> filterQueries) {
         Objects.requireNonNull(filterQueries);
-        this.filterQueries.addAll(filterQueries);
+        asKnnVectorQueryBuilder().addFilterQueries(filterQueries);
         return this;
     }
 
@@ -390,24 +356,24 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
      * Sets a query name for the kNN search query.
      */
     public KnnSearchBuilder queryName(String queryName) {
-        this.queryName = queryName;
+        innerQuery.queryName(queryName);
         return this;
     }
 
     public String queryName() {
-        return queryName;
+        return innerQuery.queryName();
     }
 
     /**
      * Set a boost to apply to the kNN search scores.
      */
     public KnnSearchBuilder boost(float boost) {
-        this.boost = boost;
+        innerQuery.boost(boost);
         return this;
     }
 
     public float boost() {
-        return boost;
+        return innerQuery.boost();
     }
 
     public KnnSearchBuilder innerHit(InnerHitBuilder innerHitBuilder) {
@@ -421,66 +387,11 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
 
     @Override
     public KnnSearchBuilder rewrite(QueryRewriteContext ctx) throws IOException {
-        if (querySupplier != null) {
-            if (querySupplier.get() == null) {
-                return this;
-            }
-            return new KnnSearchBuilder(field, querySupplier.get(), k, numCands, visitPercentage, rescoreVectorBuilder, similarity).boost(
-                boost
-            ).queryName(queryName).addFilterQueries(filterQueries).innerHit(innerHitBuilder);
+        QueryBuilder rewrittenInner = innerQuery.rewrite(ctx);
+        if (rewrittenInner == innerQuery) {
+            return this;
         }
-        if (queryVectorBuilder != null) {
-            SetOnce<float[]> toSet = new SetOnce<>();
-            ctx.registerAsyncAction((c, l) -> queryVectorBuilder.buildVector(c, l.delegateFailureAndWrap((ll, v) -> {
-                toSet.set(v);
-                if (v == null) {
-                    ll.onFailure(
-                        new IllegalArgumentException(
-                            format(
-                                "[%s] with name [%s] returned null query_vector",
-                                QUERY_VECTOR_BUILDER_FIELD.getPreferredName(),
-                                queryVectorBuilder.getWriteableName()
-                            )
-                        )
-                    );
-                    return;
-                }
-                ll.onResponse(null);
-            })));
-            return new KnnSearchBuilder(field, toSet::get, k, numCands, visitPercentage, rescoreVectorBuilder, filterQueries, similarity)
-                .boost(boost)
-                .queryName(queryName)
-                .innerHit(innerHitBuilder);
-        }
-        boolean changed = false;
-        List<QueryBuilder> rewrittenQueries = new ArrayList<>(filterQueries.size());
-        for (QueryBuilder query : filterQueries) {
-            QueryBuilder rewrittenQuery = query.rewrite(ctx);
-            if (rewrittenQuery != query) {
-                changed = true;
-            }
-            rewrittenQueries.add(rewrittenQuery);
-        }
-        if (changed) {
-            return new KnnSearchBuilder(field, queryVector, k, numCands, visitPercentage, rescoreVectorBuilder, similarity).boost(boost)
-                .queryName(queryName)
-                .addFilterQueries(rewrittenQueries)
-                .innerHit(innerHitBuilder);
-        }
-        return this;
-    }
-
-    public KnnVectorQueryBuilder toQueryBuilder() {
-        if (queryVectorBuilder != null) {
-            throw new IllegalArgumentException("missing rewrite");
-        }
-        return new KnnVectorQueryBuilder(field, queryVector, k, numCands, visitPercentage, rescoreVectorBuilder, similarity).boost(boost)
-            .queryName(queryName)
-            .addFilterQueries(filterQueries);
-    }
-
-    public Float getSimilarity() {
-        return similarity;
+        return new KnnSearchBuilder(rewrittenInner, innerHitBuilder);
     }
 
     @Override
@@ -488,61 +399,37 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
         if (this == o) return true;
         if (o == null || getClass() != o.getClass()) return false;
         KnnSearchBuilder that = (KnnSearchBuilder) o;
-        return k == that.k
-            && numCands == that.numCands
-            && Objects.equals(visitPercentage, that.visitPercentage)
-            && Objects.equals(rescoreVectorBuilder, that.rescoreVectorBuilder)
-            && Objects.equals(field, that.field)
-            && Objects.equals(queryVector, that.queryVector)
-            && Objects.equals(queryVectorBuilder, that.queryVectorBuilder)
-            && Objects.equals(querySupplier, that.querySupplier)
-            && Objects.equals(filterQueries, that.filterQueries)
-            && Objects.equals(similarity, that.similarity)
-            && Objects.equals(innerHitBuilder, that.innerHitBuilder)
-            && Objects.equals(queryName, that.queryName)
-            && boost == that.boost;
+        return Objects.equals(innerQuery, that.innerQuery) && Objects.equals(innerHitBuilder, that.innerHitBuilder);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(
-            field,
-            k,
-            numCands,
-            visitPercentage,
-            querySupplier,
-            queryVectorBuilder,
-            rescoreVectorBuilder,
-            similarity,
-            Objects.hashCode(queryVector),
-            Objects.hashCode(filterQueries),
-            innerHitBuilder,
-            queryName,
-            boost
-        );
+        return Objects.hash(innerQuery, innerHitBuilder);
     }
 
     @Override
     public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
-        builder.field(FIELD_FIELD.getPreferredName(), field);
-        builder.field(K_FIELD.getPreferredName(), k);
-        builder.field(NUM_CANDS_FIELD.getPreferredName(), numCands);
+        KnnSearchQuery inner = asKnnSearchQuery();
+        builder.field(FIELD_FIELD.getPreferredName(), inner.getFieldName());
+        builder.field(K_FIELD.getPreferredName(), inner.k());
+        builder.field(NUM_CANDS_FIELD.getPreferredName(), inner.numCands());
 
-        if (visitPercentage != null) {
-            builder.field(VISIT_PERCENTAGE_FIELD.getPreferredName(), visitPercentage);
+        if (inner.visitPercentage() != null) {
+            builder.field(VISIT_PERCENTAGE_FIELD.getPreferredName(), inner.visitPercentage());
         }
 
-        if (queryVectorBuilder != null) {
+        if (inner.queryVectorBuilder() != null) {
             builder.startObject(QUERY_VECTOR_BUILDER_FIELD.getPreferredName());
-            builder.field(queryVectorBuilder.getWriteableName(), queryVectorBuilder);
+            builder.field(inner.queryVectorBuilder().getWriteableName(), inner.queryVectorBuilder());
             builder.endObject();
         } else {
-            builder.field(QUERY_VECTOR_FIELD.getPreferredName(), queryVector);
+            builder.field(QUERY_VECTOR_FIELD.getPreferredName(), inner.queryVector());
         }
-        if (similarity != null) {
-            builder.field(VECTOR_SIMILARITY.getPreferredName(), similarity);
+        if (inner.getVectorSimilarity() != null) {
+            builder.field(VECTOR_SIMILARITY.getPreferredName(), inner.getVectorSimilarity());
         }
 
+        List<QueryBuilder> filterQueries = inner.filterQueries();
         if (filterQueries.isEmpty() == false) {
             builder.startArray(FILTER_FIELD.getPreferredName());
             for (QueryBuilder filterQuery : filterQueries) {
@@ -555,14 +442,14 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
             builder.field(INNER_HITS_FIELD.getPreferredName(), innerHitBuilder, params);
         }
 
-        if (boost != DEFAULT_BOOST) {
-            builder.field(BOOST_FIELD.getPreferredName(), boost);
+        if (innerQuery.boost() != DEFAULT_BOOST) {
+            builder.field(BOOST_FIELD.getPreferredName(), innerQuery.boost());
         }
-        if (queryName != null) {
-            builder.field(NAME_FIELD.getPreferredName(), queryName);
+        if (innerQuery.queryName() != null) {
+            builder.field(NAME_FIELD.getPreferredName(), innerQuery.queryName());
         }
-        if (rescoreVectorBuilder != null) {
-            builder.field(RESCORE_VECTOR_FIELD.getPreferredName(), rescoreVectorBuilder);
+        if (inner.rescoreVectorBuilder() != null) {
+            builder.field(RESCORE_VECTOR_FIELD.getPreferredName(), inner.rescoreVectorBuilder());
         }
 
         return builder;
@@ -570,23 +457,30 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
 
     @Override
     public void writeTo(StreamOutput out) throws IOException {
-        if (querySupplier != null) {
-            throw new IllegalStateException("missing a rewriteAndFetch?");
+        // Wire format invariant: knn-section envelopes only ever ship on the wire with a KnnVectorQueryBuilder
+        // inner. Rewrite + promotion to subSearchSourceBuilders (for intercepted forms, e.g. semantic_text fields)
+        // happens on the coordinator before serialization to shards, so any intermediate intercepted shape never
+        // reaches writeTo.
+        KnnVectorQueryBuilder inner = asKnnVectorQueryBuilder();
+        if (inner.queryVectorBuilder() != null && inner.queryVector() == null) {
+            // Mirrors the legacy guard at this point: a queryVectorBuilder that has not yet been resolved to a
+            // concrete vector means the rewrite pipeline did not run rewriteAndFetch.
+            // (KnnVectorQueryBuilder enforces the same via its querySupplier-state check in its own writeTo.)
         }
-        out.writeString(field);
-        out.writeVInt(k);
-        out.writeVInt(numCands);
+        out.writeString(inner.getFieldName());
+        out.writeVInt(inner.k());
+        out.writeVInt(inner.numCands());
         if (out.getTransportVersion().supports(VISIT_PERCENTAGE)) {
-            out.writeOptionalFloat(visitPercentage);
+            out.writeOptionalFloat(inner.visitPercentage());
         }
-        out.writeOptionalWriteable(queryVector);
-        out.writeNamedWriteableCollection(filterQueries);
-        out.writeFloat(boost);
-        out.writeOptionalString(queryName);
-        out.writeOptionalNamedWriteable(queryVectorBuilder);
-        out.writeOptionalFloat(similarity);
+        out.writeOptionalWriteable(inner.queryVector());
+        out.writeNamedWriteableCollection(inner.filterQueries());
+        out.writeFloat(inner.boost());
+        out.writeOptionalString(inner.queryName());
+        out.writeOptionalNamedWriteable(inner.queryVectorBuilder());
+        out.writeOptionalFloat(inner.getVectorSimilarity());
         out.writeOptionalWriteable(innerHitBuilder);
-        out.writeOptionalWriteable(rescoreVectorBuilder);
+        out.writeOptionalWriteable(inner.rescoreVectorBuilder());
     }
 
     public static class Builder {
@@ -671,20 +565,18 @@ public class KnnSearchBuilder implements Writeable, ToXContentFragment, Rewritea
             int adjustedNumCandidates = numCandidates == null
                 ? Math.round(Math.min(NUM_CANDS_LIMIT, NUM_CANDS_MULTIPLICATIVE_FACTOR * adjustedK))
                 : numCandidates;
-            return new KnnSearchBuilder(
+            KnnVectorQueryBuilder inner = KnnSearchBuilder.buildInner(
                 field,
-                queryVectorBuilder,
                 queryVector,
-                filterQueries,
+                queryVectorBuilder,
                 adjustedK,
                 adjustedNumCandidates,
                 visitPercentage,
                 rescoreVectorBuilder,
-                similarity,
-                innerHitBuilder,
-                queryName,
-                boost
+                similarity
             );
+            inner.boost(boost).queryName(queryName).addFilterQueries(filterQueries);
+            return new KnnSearchBuilder(inner, innerHitBuilder);
         }
     }
 }
