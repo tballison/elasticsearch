@@ -113,7 +113,7 @@ public class InterceptedInferenceKnnVectorQueryBuilder extends InterceptedInfere
 
     @Override
     protected Map<String, Float> getFields() {
-        return Map.of(getField(), 1.0f);
+        return Map.of(getFieldName(), 1.0f);
     }
 
     @Override
@@ -259,7 +259,7 @@ public class InterceptedInferenceKnnVectorQueryBuilder extends InterceptedInfere
         int inferenceFieldsQueried = 0;
         Collection<IndexMetadata> indexMetadataCollection = resolvedIndices.getConcreteLocalIndicesMetadata().values();
         for (IndexMetadata indexMetadata : indexMetadataCollection) {
-            InferenceFieldMetadata inferenceFieldMetadata = indexMetadata.getInferenceFields().get(getField());
+            InferenceFieldMetadata inferenceFieldMetadata = indexMetadata.getInferenceFields().get(getFieldName());
             if (inferenceFieldMetadata == null) {
                 nonInferenceFieldsQueried++;
             } else {
@@ -310,7 +310,7 @@ public class InterceptedInferenceKnnVectorQueryBuilder extends InterceptedInfere
         QueryRewriteContext indexMetadataContext
     ) {
         QueryBuilder rewritten;
-        MappedFieldType fieldType = indexMetadataContext.getFieldType(getField());
+        MappedFieldType fieldType = indexMetadataContext.getFieldType(getFieldName());
         if (fieldType == null) {
             rewritten = new MatchNoneQueryBuilder();
         } else if (fieldType instanceof SemanticFieldMapper.SemanticFieldType semanticFieldType) {
@@ -335,10 +335,6 @@ public class InterceptedInferenceKnnVectorQueryBuilder extends InterceptedInfere
     @Override
     public String getWriteableName() {
         return NAME;
-    }
-
-    private String getField() {
-        return originalQuery.getFieldName();
     }
 
     @Override
@@ -394,7 +390,7 @@ public class InterceptedInferenceKnnVectorQueryBuilder extends InterceptedInfere
         } else if (modelSettings.taskType() != TaskType.TEXT_EMBEDDING && modelSettings.taskType() != TaskType.EMBEDDING) {
             throw new IllegalArgumentException(
                 "Field ["
-                    + getField()
+                    + getFieldName()
                     + "] requires an embedding or text embedding model, but the configured model type is ["
                     + modelSettings.taskType()
                     + "] which is not compatible with knn queries"
@@ -410,7 +406,7 @@ public class InterceptedInferenceKnnVectorQueryBuilder extends InterceptedInfere
         }
 
         KnnVectorQueryBuilder innerKnnQuery = new KnnVectorQueryBuilder(
-            SemanticTextField.getEmbeddingsFieldName(getField()),
+            SemanticTextField.getEmbeddingsFieldName(getFieldName()),
             queryVector,
             originalQuery.k(),
             originalQuery.numCands(),
@@ -420,7 +416,7 @@ public class InterceptedInferenceKnnVectorQueryBuilder extends InterceptedInfere
         );
         innerKnnQuery.addFilterQueries(originalQuery.filterQueries());
 
-        return QueryBuilders.nestedQuery(SemanticTextField.getChunksFieldName(getField()), innerKnnQuery, ScoreMode.Max)
+        return QueryBuilders.nestedQuery(SemanticTextField.getChunksFieldName(getFieldName()), innerKnnQuery, ScoreMode.Max)
             .boost(originalQuery.boost())
             .queryName(originalQuery.queryName());
     }
@@ -432,7 +428,7 @@ public class InterceptedInferenceKnnVectorQueryBuilder extends InterceptedInfere
         }
 
         KnnVectorQueryBuilder knnQuery = new KnnVectorQueryBuilder(
-            getField(),
+            getFieldName(),
             queryVector,
             originalQuery.k(),
             originalQuery.numCands(),
