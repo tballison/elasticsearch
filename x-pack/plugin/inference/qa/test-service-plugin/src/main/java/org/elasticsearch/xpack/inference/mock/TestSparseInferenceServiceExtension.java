@@ -39,6 +39,7 @@ import org.elasticsearch.xpack.core.inference.results.SparseEmbeddingResults;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
@@ -46,6 +47,15 @@ import java.util.Map;
 import java.util.Objects;
 
 public class TestSparseInferenceServiceExtension implements InferenceServiceExtension {
+
+    /**
+     * Records the input of every {@link AbstractSparseTestInferenceService#infer} invocation across all nodes in the
+     * test JVM. Because internal cluster tests run every node (of every cluster) in a single JVM, tests can use this
+     * to count how many times query-time inference is actually executed, and where the inputs came from. Call
+     * {@link List#clear()} before the operation under test to discard calls made during setup (endpoint validation,
+     * document ingestion).
+     */
+    public static final List<List<String>> RECORDED_INFER_CALLS = Collections.synchronizedList(new ArrayList<>());
 
     @Override
     public List<Factory> getInferenceServiceFactories() {
@@ -135,6 +145,7 @@ public class TestSparseInferenceServiceExtension implements InferenceServiceExte
             TimeValue timeout,
             ActionListener<InferenceServiceResults> listener
         ) {
+            RECORDED_INFER_CALLS.add(List.copyOf(input));
             if (Objects.equals(((TestTaskSettings) model.getTaskSettings()).shouldFailValidation(), Boolean.TRUE)) {
                 listener.onFailure(new RuntimeException("validation call intentionally failed based on task settings"));
                 return;

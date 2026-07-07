@@ -66,6 +66,15 @@ import static org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper.*;
 
 public class TestDenseInferenceServiceExtension implements InferenceServiceExtension {
 
+    /**
+     * Records the input of every {@link TestInferenceService#infer} invocation across all nodes in the test JVM.
+     * Because internal cluster tests run every node (of every cluster) in a single JVM, tests can use this to count
+     * how many times query-time inference is actually executed, and where the inputs came from. Call
+     * {@link List#clear()} before the operation under test to discard calls made during setup (endpoint validation,
+     * document ingestion).
+     */
+    public static final List<List<String>> RECORDED_INFER_CALLS = Collections.synchronizedList(new ArrayList<>());
+
     public static final int DEFAULT_EMBEDDING_DIMENSIONS = 128;
 
     @Override
@@ -145,6 +154,7 @@ public class TestDenseInferenceServiceExtension implements InferenceServiceExten
             TimeValue timeout,
             ActionListener<InferenceServiceResults> listener
         ) {
+            RECORDED_INFER_CALLS.add(List.copyOf(input));
             if (Objects.equals((((TestTaskSettings) model.getTaskSettings()).shouldFailValidation()), Boolean.TRUE)) {
                 listener.onFailure(new RuntimeException("validation call intentionally failed based on task settings"));
                 return;
