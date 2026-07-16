@@ -29,6 +29,7 @@ import org.elasticsearch.xpack.esql.core.tree.Source;
 import org.elasticsearch.xpack.esql.core.type.DataType;
 import org.elasticsearch.xpack.esql.io.stream.PlanStreamInput;
 import org.elasticsearch.xpack.esql.plan.GeneratingPlan;
+import org.elasticsearch.xpack.esql.planner.HighlightQueryBuilders;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -38,7 +39,6 @@ import java.util.Objects;
 import static org.elasticsearch.xpack.esql.common.Failure.fail;
 import static org.elasticsearch.xpack.esql.expression.NamedExpressions.mergeOutputAttributes;
 
-// TODO: carry an analyzer name here once the "analyzer" option is supported.
 public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPlan<Highlight>, PostAnalysisVerificationAware {
 
     public static final NamedWriteableRegistry.Entry ENTRY = new NamedWriteableRegistry.Entry(
@@ -49,7 +49,6 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
 
     public static final String DEFAULT_PREFIX = "highlight_";
 
-    // Options honoured by HighlightOptions and the unified highlighter.
     public static final String PRE_TAGS = "pre_tags";
     public static final String POST_TAGS = "post_tags";
     public static final String NUMBER_OF_FRAGMENTS = "number_of_fragments";
@@ -161,8 +160,8 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
     }
 
     /**
-     * Builds the {@code <prefix><field>} keyword output attributes for the given highlight fields.
-     * The attributes are nullable because a field that the query does not match yields {@code null}.
+     * Builds nullable {@code <prefix><field>} keyword attributes for the given highlight fields.
+     * A generated name that collides with existing output shadows the earlier column.
      */
     public static List<Attribute> generatedAttributesFor(Source source, String prefix, List<NamedExpression> fields) {
         return fields.stream()
@@ -211,7 +210,7 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
 
     @Override
     protected AttributeSet computeReferences() {
-        // Only the ON fields are inputs; the generated highlight_<field> columns are outputs, not references.
+        // Only the ON fields are inputs; the generated <prefix><field> columns are outputs, not references.
         return Expressions.references(fields);
     }
 
@@ -230,6 +229,8 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
 
     @Override
     public void postAnalysisVerification(Failures failures) {
+        verifyFieldTypes(failures);
+        verifyQuery(failures);
         if (options == null) {
             return;
         }
@@ -238,6 +239,33 @@ public class Highlight extends UnaryPlan implements TelemetryAware, GeneratingPl
         verifyEnum(failures, HighlightOptions.ORDER_OPTION);
         for (String name : VALID_OPTION_NAMES) {
             verifyValue(failures, name);
+        }
+    }
+
+    private void verifyQuery(Failures failures) {
+        if (query == null || query.resolved() == false) {
+            return;
+        }
+        List<String> fieldNames = fields.stream().map(NamedExpression::name).toList();
+        try {
+            HighlightQueryBuilders.verify(query, fieldNames);
+        } catch (IllegalArgumentException e) {
+            failures.add(fail(this, "{}", e.getMessage()));
+        }
+    }
+
+    private void verifyFieldTypes(Failures failures) {
+        for (NamedExpression field : fields) {
+            if (field.resolved() && DataType.isString(field.dataType()) == false) {
+                failures.add(
+                    fail(
+                        field,
+                        "HIGHLIGHT ON field [{}] must be [text] or [keyword], found [{}]",
+                        field.name(),
+                        field.dataType().typeName()
+                    )
+                );
+            }
         }
     }
 
