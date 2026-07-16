@@ -94,8 +94,16 @@ public class InferenceCallCountCrossClusterSearchIT extends AbstractSemanticCros
 
     public void testInferenceCallCountCcsMinimizeRoundTripsTrue() throws Exception {
         setupMultiShardClusters();
-        for (FieldType fieldType : FieldType.values()) {
-            assertInferenceCallCount(fieldType, QUERY_INDICES, true, 2);
+
+        for (boolean batchedQueryPhase : new boolean[] { true, false }) {
+            setBatchedQueryPhase(batchedQueryPhase);
+            try {
+                for (FieldType fieldType : FieldType.values()) {
+                    assertInferenceCallCount(fieldType, QUERY_INDICES, true, 2);
+                }
+            } finally {
+                clearBatchedQueryPhase();
+            }
         }
     }
 
