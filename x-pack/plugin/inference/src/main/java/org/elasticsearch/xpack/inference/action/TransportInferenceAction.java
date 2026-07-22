@@ -17,6 +17,8 @@ import org.elasticsearch.inference.Model;
 import org.elasticsearch.inference.telemetry.InferenceStats;
 import org.elasticsearch.injection.guice.Inject;
 import org.elasticsearch.license.XPackLicenseState;
+import org.elasticsearch.logging.LogManager;
+import org.elasticsearch.logging.Logger;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TransportService;
 import org.elasticsearch.xpack.core.inference.action.InferenceAction;
@@ -24,6 +26,7 @@ import org.elasticsearch.xpack.inference.action.task.StreamingTaskManager;
 import org.elasticsearch.xpack.inference.registry.InferenceEndpointRegistry;
 
 public class TransportInferenceAction extends BaseTransportInferenceAction<InferenceAction.Request> {
+    private static final Logger logger = LogManager.getLogger(TransportInferenceAction.class);
 
     @Inject
     public TransportInferenceAction(
@@ -67,6 +70,8 @@ public class TransportInferenceAction extends BaseTransportInferenceAction<Infer
         InferenceService service,
         ActionListener<InferenceServiceResults> listener
     ) {
+        logger.info("TransportInferenceAction.doInference: inferenceId=[{}] inputType=[{}] input=[{}]",
+            model.getInferenceEntityId(), request.getInputType(), request.getInput());
         service.infer(
             model,
             request.getInput(),

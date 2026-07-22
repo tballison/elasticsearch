@@ -9,6 +9,8 @@ package org.elasticsearch.xpack.inference.queries;
 
 import org.apache.lucene.util.SetOnce;
 import org.elasticsearch.TransportVersion;
+import org.elasticsearch.logging.LogManager;
+import org.elasticsearch.logging.Logger;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.OriginalIndices;
 import org.elasticsearch.action.ResolvedIndices;
@@ -63,6 +65,7 @@ import static org.elasticsearch.xpack.core.inference.action.GetInferenceFieldsIn
 import static org.elasticsearch.xpack.core.inference.action.GetInferenceFieldsInternalAction.GET_INFERENCE_FIELDS_EMBEDDING_INPUT_TV;
 
 public final class InferenceQueryUtils {
+    private static final Logger logger = LogManager.getLogger(InferenceQueryUtils.class);
     /**
      * <p>
      * Inference info aggregated across queried local and remote indices.
@@ -687,6 +690,8 @@ public final class InferenceQueryUtils {
                 l.onResponse(Tuple.tuple(fullyQualifiedInferenceId, inferenceResults));
             });
 
+            logger.info("Inference call: inferenceId=[{}] taskType=[{}] clusterAlias=[{}] input=[{}]",
+                inferenceId, taskType, clusterAlias, input);
             executeInferenceForTaskType(client, input, inferenceId, taskType, TIMEOUT_NOT_DETERMINED, responseListener);
         }
     }

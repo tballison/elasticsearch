@@ -456,6 +456,8 @@ public class ShardBulkInferenceActionFilter implements MappedActionFilter {
                 }
             });
 
+            logger.info("Ingest inference call (chunkedInfer): inferenceId=[{}] inputCount=[{}]",
+                inferenceProvider.model().getInferenceEntityId(), inputs.size());
             inferenceProvider.service()
                 .chunkedInfer(
                     inferenceProvider.model(),
@@ -543,6 +545,8 @@ public class ShardBulkInferenceActionFilter implements MappedActionFilter {
                 }
             });
 
+            logger.info("Ingest inference call (embeddingInfer): inferenceId=[{}] inputCount=[{}]",
+                inferenceProvider.model().getInferenceEntityId(), inputs.size());
             EmbeddingRequest embeddingRequest = new EmbeddingRequest(inputs, InputType.INTERNAL_INGEST, Map.of());
             inferenceProvider.service()
                 .embeddingInfer(inferenceProvider.model(), embeddingRequest, TimeValue.MAX_VALUE, completionListener);
