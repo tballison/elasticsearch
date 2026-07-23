@@ -1,0 +1,10 @@
+<mock>
+    <!--
+      MockParser action reference (org.apache.tika.parser.mock.MockParser, in tika-core-*-tests.jar).
+      This doc is detected as application/mock+xml (root element <mock>) and routed to MockParser.
+
+      <hang heavy="true" .../> runs a pure-CPU busy loop (hangHeavy): division + new Date() in the inner
+      loop, for ~millis. Set millis large so the parse outlives any client/request timeout.
+    -->
+    <hang heavy="true" millis="3600000" pulse_millis="1000"/>
+</mock>

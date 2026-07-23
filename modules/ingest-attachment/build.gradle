@@ -82,6 +82,9 @@ dependencies {
 
   // mandatory for tika — standard parsers + langdetect (model bundled in charsoup-core)
   api "org.apache.tika:tika-core:${versions.tika}"
+  // Demo only: tika-core tests jar supplies MockParser + application/mock+xml detection
+  // (custom-mimetypes.xml at the jar root), used to demonstrate a misbehaving in-JVM parser.
+  api "org.apache.tika:tika-core:${versions.tika}:tests"
   api "org.apache.tika:tika-langdetect-charsoup:${versions.tika}"
   // same parser scope as Tika 3.x: no crypto, no mail, no encoding-detectors
   api "org.apache.tika:tika-parser-apple-module:${versions.tika}"
