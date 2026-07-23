@@ -365,6 +365,22 @@ public class SharedBlobCacheWarmingService {
         Setting.Property.Dynamic
     );
 
+    /**
+     * Maximum number of ranges that a single {@link AbstractWarmer.WarmingTask} may fetch concurrently for a blob region. Each
+     * in-flight fetch occupies heap from the moment its bytes arrive over the wire until one of the (disk-bound) fill threads
+     * writes them to the cache file, none of it tracked by circuit breakers. Dispatching an entire region queue at once lets
+     * network receives outrun disk writes and can exhaust the heap (unbounded buffers pile up in the fill thread pool queue),
+     * so this limit — together with the warming task throttle — caps the heap consumed by region warming. Raise it to pipeline
+     * more fetches per region at the cost of more heap.
+     */
+    public static final Setting<Integer> WARM_REGION_FETCH_CONCURRENCY_SETTING = Setting.intSetting(
+        "stateless.blob_cache_warming.warm_region_fetch_concurrency",
+        1,
+        1,
+        Setting.Property.NodeScope,
+        Setting.Property.Dynamic
+    );
+
     private final StatelessSharedBlobCacheService cacheService;
     private final ThreadPool threadPool;
     private final Executor fetchExecutor;
@@ -384,6 +400,7 @@ public class SharedBlobCacheWarmingService {
     private volatile double idLookupPrewarmRatio;
     private volatile long maxUploadPrewarmSize;
     private volatile int warmByteRangePerFileConcurrency;
+    private volatile int warmRegionFetchConcurrency;
     private final WarmingRatioProvider warmingRatioProvider;
     private volatile TimeValue searchRecoveryWarmingRelocationWithShutdownTimeout;
     private volatile TimeValue searchRecoveryWarmingRelocationTimeout;
@@ -490,6 +507,7 @@ public class SharedBlobCacheWarmingService {
             WARM_BYTE_RANGE_PER_FILE_CONCURRENCY_SETTING,
             value -> this.warmByteRangePerFileConcurrency = value
         );
+        clusterSettings.initializeAndWatch(WARM_REGION_FETCH_CONCURRENCY_SETTING, value -> this.warmRegionFetchConcurrency = value);
     }
 
     public void warmCacheBeforeUpload(VirtualBatchedCompoundCommit vbcc, ActionListener<Void> listener) {
@@ -1735,6 +1753,11 @@ public class SharedBlobCacheWarmingService {
             public void onResponse(Releasable releasable) {
                 try (RefCountingRunnable refs = new RefCountingRunnable(() -> Releasables.close(releasable))) {
                     var cacheKey = new FileCacheKey(warmingRun.shardId(), blobRegion.blob.primaryTerm(), blobRegion.blob.blobName());
+                    // Bounds the in-flight fetches for this region: a fetched range occupies heap, untracked by circuit breakers,
+                    // from the moment its bytes arrive over the wire until a (disk-bound) fill thread writes them to the cache
+                    // file. Each fetch holds its permit until that write completes (or fails), so that network receives cannot
+                    // outrun disk writes and exhaust the heap.
+                    var fetchRunner = new ThrottledTaskRunner("warm-region-fetch", warmRegionFetchConcurrency, threadPool.generic());
 
                     var remaining = queue.counter.get();
                     assert 0 < remaining : remaining;
@@ -1750,18 +1773,37 @@ public class SharedBlobCacheWarmingService {
                             }
 
                             var blobLocation = item.blobLocation();
+                            // resolved here rather than in the enqueued task: getCacheBlobReaderForWarming expects a generic thread
                             var cacheBlobReader = directory.getCacheBlobReaderForWarming(blobLocation.blobFile());
                             var itemListener = ActionListener.releaseAfter(item.listener(), Releasables.assertOnce(refs.acquire()));
-                            maybeFetchBlobRange(item, cacheBlobReader, cacheKey, itemListener.delegateResponse((l, e) -> {
-                                if (ExceptionsHelper.unwrap(e, ResourceAlreadyUploadedException.class) != null) {
-                                    logger.debug(() -> "retrying " + blobLocation + " from object store", e);
-                                    // retrying runs on {@link StatelessPlugin#FILL_VIRTUAL_BATCHED_COMPOUND_COMMIT_CACHE_THREAD_POOL}
-                                    // threads, but that is OK because fetchRange doesn't block or wait for anything.
-                                    maybeFetchBlobRange(item, cacheBlobReader, cacheKey, l);
-                                } else {
-                                    l.onFailure(e);
+                            fetchRunner.enqueueTask(new ActionListener<>() {
+                                @Override
+                                public void onResponse(Releasable permit) {
+                                    var l = ActionListener.releaseAfter(itemListener, permit);
+                                    maybeFetchBlobRange(item, cacheBlobReader, cacheKey, l.delegateResponse((delegate, e) -> {
+                                        if (ExceptionsHelper.unwrap(e, ResourceAlreadyUploadedException.class) != null) {
+                                            logger.debug(() -> "retrying " + blobLocation + " from object store", e);
+                                            // retrying runs on {@link
+                                            // StatelessPlugin#FILL_VIRTUAL_BATCHED_COMPOUND_COMMIT_CACHE_THREAD_POOL}
+                                            // threads, but that is OK because fetchRange doesn't block or wait for anything.
+                                            maybeFetchBlobRange(item, cacheBlobReader, cacheKey, delegate);
+                                        } else {
+                                            delegate.onFailure(e);
+                                        }
+                                    }));
                                 }
-                            }));
+
+                                @Override
+                                public void onFailure(Exception e) {
+                                    // the task could not be run nor queued, e.g. the node is shutting down
+                                    itemListener.onFailure(e);
+                                }
+
+                                @Override
+                                public String toString() {
+                                    return "WarmingTask fetch " + item.blobLocation();
+                                }
+                            });
                         }
 
                         remaining = queue.counter.addAndGet(-remaining);

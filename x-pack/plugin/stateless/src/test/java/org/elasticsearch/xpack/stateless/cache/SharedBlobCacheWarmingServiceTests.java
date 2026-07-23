@@ -13,6 +13,7 @@ import org.apache.lucene.util.SetOnce;
 import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.blobcache.BlobCacheMetrics;
+import org.elasticsearch.blobcache.BlobCacheUtils;
 import org.elasticsearch.blobcache.common.ByteRange;
 import org.elasticsearch.blobcache.shared.DefaultEvictionPolicy;
 import org.elasticsearch.blobcache.shared.EvictionPolicy;
@@ -31,6 +32,7 @@ import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeValue;
+import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.env.Environment;
@@ -90,10 +92,14 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongConsumer;
@@ -1106,6 +1112,225 @@ public class SharedBlobCacheWarmingServiceTests extends ESTestCase {
                 lessThan(lastB)
             );
         }
+    }
+
+    /**
+     * Verifies that a {@link SharedBlobCacheWarmingService.AbstractWarmer.WarmingTask} fetches at most
+     * {@link SharedBlobCacheWarmingService#WARM_REGION_FETCH_CONCURRENCY_SETTING} ranges of its blob region at a time: the
+     * next range fetch must only be dispatched once a previous one has been fully consumed by the cache fill. Every
+     * in-flight fetch occupies heap, untracked by circuit breakers, until a fill thread writes it to the cache file, so
+     * dispatching a region's entire range queue at once can exhaust the heap when fetches outpace the disk-bound fill
+     * pool (as observed in production search-node OOMs during warming).
+     * <p>
+     * The test intercepts the scheduling of warming tasks and runs each task with a no-op throttle slot (i.e. an unlimited
+     * central throttle), and gates every warming fetch so it only completes when the test releases it. The number of fetches
+     * dispatched-but-not-released can then never exceed the number of started warming tasks times the per-region fetch
+     * concurrency, no matter how many ranges each region has queued.
+     */
+    public void testWarmingTaskRegionFetchConcurrencyIsBounded() throws Exception {
+        final long primaryTerm = randomLongBetween(10, 42);
+        // small regions so that commits produce several distinct ranges per region and span multiple regions
+        final long regionSizeInBytes = SharedBytes.PAGE_SIZE * 4;
+        final long rangeSizeInBytes = regionSizeInBytes;
+
+        // warming tasks captured instead of scheduled, so that the test controls when each one starts
+        final Queue<ActionListener<Releasable>> capturedTasks = ConcurrentCollections.newQueue();
+        // gated warming fetches, released one at a time by the test
+        final BlockingQueue<Runnable> pendingFetches = new LinkedBlockingQueue<>();
+        final AtomicInteger dispatchedButNotReleasedFetches = new AtomicInteger();
+        final AtomicInteger totalFetches = new AtomicInteger();
+        final Map<String, AtomicInteger> fetchesPerRegion = new ConcurrentHashMap<>();
+
+        try (var fakeNode = new FakeStatelessNode(this::newEnvironment, this::newNodeEnvironment, xContentRegistry(), primaryTerm) {
+            @Override
+            protected Settings nodeSettings() {
+                return Settings.builder()
+                    .put(super.nodeSettings())
+                    .put(SharedBlobCacheService.SHARED_CACHE_SIZE_SETTING.getKey(), ByteSizeValue.ofMb(4))
+                    .put(SharedBlobCacheService.SHARED_CACHE_REGION_SIZE_SETTING.getKey(), ByteSizeValue.ofBytes(regionSizeInBytes))
+                    .put(SharedBlobCacheService.SHARED_CACHE_RANGE_SIZE_SETTING.getKey(), ByteSizeValue.ofBytes(rangeSizeInBytes))
+                    // page-sized minimization step yields distinct sub-ranges (gaps) per file within the same region, which is
+                    // what allows concurrent fetches of the same region in the first place
+                    .put(
+                        SharedBlobCacheWarmingService.PREWARMING_RANGE_MINIMIZATION_STEP.getKey(),
+                        ByteSizeValue.ofBytes(SharedBytes.PAGE_SIZE)
+                    )
+                    // disable offline warming and its commit prefetching: they issue warming-reason reads outside the
+                    // warming tasks captured by this test, which would break the fetch accounting below
+                    .put(SharedBlobCacheWarmingService.SEARCH_OFFLINE_WARMING_PREFETCH_COMMITS_ENABLED_SETTING.getKey(), false)
+                    .put(SharedBlobCacheWarmingService.SEARCH_OFFLINE_WARMING_ENABLED_SETTING.getKey(), false)
+                    .build();
+            }
+
+            @Override
+            protected SharedBlobCacheWarmingService createSharedBlobCacheWarmingService(
+                StatelessSharedBlobCacheService cacheService,
+                ThreadPool threadPool,
+                TelemetryProvider telemetryProvider,
+                ClusterSettings clusterSettings,
+                WarmingRatioProvider warmingRatioProvider
+            ) {
+                return new SharedBlobCacheWarmingService(
+                    cacheService,
+                    threadPool,
+                    telemetryProvider,
+                    clusterSettings,
+                    warmingRatioProvider
+                ) {
+                    @Override
+                    protected void scheduleWarmingTask(ActionListener<Releasable> task) {
+                        capturedTasks.add(task);
+                    }
+                };
+            }
+
+            @Override
+            protected CacheBlobReaderService createCacheBlobReaderService(StatelessSharedBlobCacheService cacheService) {
+                return new CacheBlobReaderService(nodeSettings, cacheService, client, threadPool) {
+                    @Override
+                    public CacheBlobReader getCacheBlobReader(
+                        ShardId shardId,
+                        LongFunction<BlobContainer> blobContainer,
+                        BlobFile blobFile,
+                        MutableObjectStoreUploadTracker objectStoreUploadTracker,
+                        LongConsumer totalBytesReadFromObjectStore,
+                        LongConsumer totalBytesReadFromIndexing,
+                        BlobCacheMetrics.CachePopulationReason cachePopulationReason,
+                        Executor objectStoreFetchExecutor,
+                        String fileName
+                    ) {
+                        var reader = new ObjectStoreCacheBlobReader(
+                            blobContainer.apply(blobFile.primaryTerm()),
+                            blobFile.blobName(),
+                            cacheService.getRangeSize(),
+                            objectStoreFetchExecutor
+                        ) {
+                            @Override
+                            public ByteRange getRange(long position, int length, long remainingFileLength) {
+                                // page-sized chunks, like IndexingShardCacheBlobReader uses when fetching from the indexing
+                                // node: distinct files within a region map to distinct gaps, which is what makes concurrent
+                                // fetches of the same region possible in the first place (the default object store reader
+                                // rounds every request to the full range size, so a region's ranges all nest and dedup)
+                                long start = BlobCacheUtils.roundDownToAlignedSize(position, SharedBytes.PAGE_SIZE);
+                                long chunkEnd = BlobCacheUtils.roundUpToAlignedSize(position + length, SharedBytes.PAGE_SIZE);
+                                long fileEnd = BlobCacheUtils.toPageAlignedSize(position + remainingFileLength);
+                                return ByteRange.of(start, Math.min(chunkEnd, fileEnd));
+                            }
+
+                            @Override
+                            public void getRangeInputStream(long position, int length, ActionListener<InputStream> listener) {
+                                if (cachePopulationReason != BlobCacheMetrics.CachePopulationReason.Warming) {
+                                    // gate warming fetches only; commit resolution and on-demand reads proceed normally
+                                    super.getRangeInputStream(position, length, listener);
+                                    return;
+                                }
+                                dispatchedButNotReleasedFetches.incrementAndGet();
+                                totalFetches.incrementAndGet();
+                                fetchesPerRegion.computeIfAbsent(
+                                    blobFile.blobName() + "#" + (position / regionSizeInBytes),
+                                    unused -> new AtomicInteger()
+                                ).incrementAndGet();
+                                pendingFetches.add(() -> {
+                                    dispatchedButNotReleasedFetches.decrementAndGet();
+                                    super.getRangeInputStream(position, length, listener);
+                                });
+                            }
+                        };
+                        return reader;
+                    }
+                };
+            }
+        }) {
+            // build a vbcc with many small files so that regions have several ranges queued for warming
+            Map<String, BlobLocation> uploadedBlobLocations = new HashMap<>();
+            var indexCommits = fakeNode.generateIndexCommits(randomIntBetween(8, 16), false);
+            VirtualBatchedCompoundCommit vbcc = new VirtualBatchedCompoundCommit(
+                fakeNode.shardId,
+                "fake-node-id",
+                primaryTerm,
+                indexCommits.get(0).getGeneration(),
+                fileName -> uploadedBlobLocations.get(fileName),
+                ESTestCase::randomNonNegativeLong,
+                fakeNode.sharedCacheService.getRegionSize(),
+                randomIntBetween(0, fakeNode.sharedCacheService.getRegionSize())
+            );
+            for (StatelessCommitRef ref : indexCommits) {
+                // without replicated internal file content, so that warming the files requires actual fetches
+                assertTrue(vbcc.appendCommit(ref, false, null));
+            }
+            vbcc.freeze();
+
+            var indexBlobContainer = fakeNode.getShardContainer();
+            try (var vbccInputStream = vbcc.getFrozenInputStreamForUpload()) {
+                indexBlobContainer.writeBlobAtomic(
+                    OperationPurpose.INDICES,
+                    vbcc.getBlobName(),
+                    vbccInputStream,
+                    vbcc.getTotalSizeInBytes(),
+                    true
+                );
+            }
+            uploadedBlobLocations.putAll(vbcc.lastCompoundCommit().commitFiles());
+
+            var lastCommit = vbcc.getFrozenBatchedCompoundCommit().lastCompoundCommit();
+            fakeNode.searchDirectory.updateCommit(lastCommit);
+
+            var indexShard = mockIndexShard(fakeNode);
+            PlainActionFuture<Void> warmListener = new PlainActionFuture<>();
+            fakeNode.warmingService.warmCache(SEARCH, indexShard, lastCommit, fakeNode.searchDirectory, null, false, warmListener);
+
+            // Phase 1: start every scheduled warming task without releasing any fetch, then wait for the dispatch wave to
+            // settle. Each task may only dispatch up to the per-region fetch concurrency before its first fetch completes,
+            // no matter how many ranges its region has queued; the old unbounded behavior dispatched them all at once.
+            int regionFetchConcurrency = SharedBlobCacheWarmingService.WARM_REGION_FETCH_CONCURRENCY_SETTING.get(Settings.EMPTY);
+            int tasksStarted = startCapturedWarmingTasks(fakeNode, capturedTasks);
+            assertThat(tasksStarted, greaterThan(0));
+            int settledFetches = totalFetches.get();
+            for (int previousFetches = -1; previousFetches != settledFetches; settledFetches = totalFetches.get()) {
+                previousFetches = settledFetches;
+                safeSleep(200);
+            }
+            assertThat(
+                "with no fetch released yet, each task may have dispatched at most [" + regionFetchConcurrency + "] fetches",
+                dispatchedButNotReleasedFetches.get(),
+                lessThanOrEqualTo(tasksStarted * regionFetchConcurrency)
+            );
+
+            // Phase 2: drive warming to completion by releasing one gated fetch at a time, starting any follow-up tasks
+            // that warming enqueues along the way (e.g. for compound file entries). Releasing a fetch completes the fill
+            // it belongs to, which allows the owning task to dispatch its region's next range fetch.
+            var fetchExecutor = fakeNode.threadPool.executor(StatelessPlugin.PREWARM_THREAD_POOL);
+            long deadlineNanos = System.nanoTime() + TimeUnit.SECONDS.toNanos(SAFE_AWAIT_TIMEOUT.seconds());
+            while (warmListener.isDone() == false) {
+                assertThat("timed out driving warming to completion", System.nanoTime(), lessThan(deadlineNanos));
+                tasksStarted += startCapturedWarmingTasks(fakeNode, capturedTasks);
+                Runnable fetch = pendingFetches.poll(10, TimeUnit.MILLISECONDS);
+                if (fetch != null) {
+                    // complete the fetch on the prewarm pool, where cache fills are expected to run
+                    fetchExecutor.execute(fetch);
+                }
+            }
+            safeGet(warmListener);
+
+            // sanity: at least one region needed more fetches than the per-region fetch concurrency, otherwise the phase 1
+            // bound would hold even with an unbounded dispatch
+            int maxFetchesForAnyRegion = fetchesPerRegion.values().stream().mapToInt(AtomicInteger::get).max().orElse(0);
+            assertThat(maxFetchesForAnyRegion, greaterThan(regionFetchConcurrency));
+            assertThat(dispatchedButNotReleasedFetches.get(), equalTo(0));
+        }
+    }
+
+    private static int startCapturedWarmingTasks(FakeStatelessNode fakeNode, Queue<ActionListener<Releasable>> capturedTasks) {
+        int started = 0;
+        ActionListener<Releasable> task;
+        while ((task = capturedTasks.poll()) != null) {
+            started++;
+            var startedTask = task;
+            // warming tasks expect to run on the generic pool; the no-op releasable simulates an unlimited central
+            // throttle so that the observed fetch bound can only come from the per-region fetch concurrency
+            fakeNode.threadPool.generic().execute(() -> startedTask.onResponse(() -> {}));
+        }
+        return started;
     }
 
     /**
