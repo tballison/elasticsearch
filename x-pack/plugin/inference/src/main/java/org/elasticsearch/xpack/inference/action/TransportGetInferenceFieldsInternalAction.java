@@ -51,6 +51,10 @@ public class TransportGetInferenceFieldsInternalAction extends HandledTransportA
     GetInferenceFieldsInternalAction.Request,
     GetInferenceFieldsInternalAction.Response> {
 
+    private static final org.elasticsearch.logging.Logger logger = org.elasticsearch.logging.LogManager.getLogger(
+        TransportGetInferenceFieldsInternalAction.class
+    );
+
     private final TransportService transportService;
     private final ClusterService clusterService;
     private final ProjectResolver projectResolver;
@@ -113,6 +117,12 @@ public class TransportGetInferenceFieldsInternalAction extends HandledTransportA
                 inferenceFieldsMap.put(index, inferenceFieldMetadataList);
             });
 
+            logger.info(
+                "[CCS-DIAG] GetInferenceFieldsInternalAction: node={} hasInput={} indices={}",
+                clusterService.localNode().getName(),
+                input != null,
+                Arrays.toString(concreteLocalIndices)
+            );
             if (input != null) {
                 Set<String> inferenceIds = inferenceFieldsMap.values()
                     .stream()

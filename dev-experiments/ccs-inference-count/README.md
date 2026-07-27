@@ -1,89 +1,233 @@
-# CCS Inference Call Counting Harness
+# CCS Inference & Batching Investigation Harness
 
-Counts query-time inference calls during cross-cluster search (CCS) on `semantic_text`
-fields, and shows **which node** ran inference and **whether it did a full query rewrite**.
+Investigates two questions about cross-cluster search (CCS), related to
+issue [#146908](https://github.com/elastic/elasticsearch/issues/146908):
 
-Related: issue #146908, branch `ccs-inference-check` (in-JVM equivalent:
-`InferenceCallCountCrossClusterSearchIT`).
+1. **How many query-time inference calls** does a CCS search on `semantic_text`
+   make, and which node runs them? (Answer: one per cluster per search, in every
+   mrt/batched combination.)
+2. **Why does `search.batched_query_phase=true` remove the dramatic mrt=false
+   latency regression** — including for queries with *no* inference field?
+   (Answer: unbatched mrt=false pays `ceil(shards_per_node / 5)` *sequential*
+   WAN round trips per remote node because of the `max_concurrent_shard_requests`
+   throttle; batching collapses each node's shards into one request = one round
+   trip regardless of shard count. See "Findings" for measured data.)
+
+Branch: `ccs-inference-check` (in-JVM equivalent: `InferenceCallCountCrossClusterSearchIT`).
+
+## Findings (measured 2026-07-27, Docker Desktop on an Apple-silicon MacBook Pro)
+
+Plain `match` query on a plain `text` field — **zero inference involvement** —
+CCS with `ccs_minimize_roundtrips=false`, 50ms one-way (~105ms RTT) injected on
+the inter-cluster link only, 15 tiny documents total:
+
+| shards/idx | ~shards per remote node | waves = ceil(n/5) | predicted took (445 + (waves−1)×105) | measured, batched=false | measured, batched=true |
+|---|---|---|---|---|---|
+| 5  | 5  | 1 | 445  | 449, 447 | 442, 453 |
+| 10 | 10 | 2 | 550  | 564, 545 | 439, 451 |
+| 15 | 15 | 3 | 655  | 643, 638 | 440, 443 |
+| 20 | 20 | 4 | 760  | 769, 771 | 443, 446 |
+| 30 | 30 | 6 | 970  | 949, 984 | 433, 445 |
+
+Unbatched `took` fits `base + (ceil(shards_per_node/5) − 1) × RTT` almost
+exactly; batched stays flat at the ~445ms base regardless of shard count.
+Extrapolated to production scale, 100 shards/node on a 50ms one-way link is
++19 RTT ≈ +2s — "dramatic" — and disappears entirely with batching.
+
+**Mechanism** (`SearchQueryThenFetchAsyncAction.doRun`, ~line 503): unbatched,
+the coordinator sends one transport request **per shard**, throttled to
+`max_concurrent_shard_requests` (default **5**) concurrent requests per node
+(`SearchRequest.java:106`, enforced by `PendingExecutions`); an unbatched node
+with N shards therefore costs ceil(N/5) sequential round trips. Batched, shards
+are grouped by `(clusterAlias, nodeId)` and sent as **one**
+`indices:data/read/search[query][n]` request per node, partially reduced on the
+data node. Coordinator-local shards always go per-shard (no network latency).
+
+**Ruled out as the mechanism**: inference-call count (the mock counter shows
+2 calls — 1 local + 1 remote — in every mrt/batched combination) and the
+mrt=false-only `GetInferenceFieldsInternalAction` RPC (fires once regardless
+of batching).
+
+**Cross-checks worth running**: (a) `?max_concurrent_shard_requests=30` on an
+unbatched high-shard search should collapse the gap without batching;
+(b) at 5 shards/node the *semantic* query showed a +126ms gap (634 vs 508) that
+the plain query does not (449 vs 442) — likely the duplicated per-shard query
+embedding payload (see "Phase bytes" log), a second-order effect.
+
+## What's on this branch (instrumentation, not for upstream)
+
+Java changes — rebuild the Docker image after touching any of these:
+
+- `server/.../action/search/AbstractSearchAsyncAction.java` —
+  `[CCS-DIAG] Shard query` (one line per per-shard dispatch, in
+  `doPerformPhaseOnShard`) and `[CCS-DIAG] Phase bytes` (per-phase wire-format
+  request/response bytes in `executeNextPhase`; **only off-node transport is
+  counted**, so it is exactly the network payload; logged only when nonzero).
+- `server/.../action/search/SearchQueryThenFetchAsyncAction.java` —
+  `[CCS-DIAG] Node-batched query` (one line per per-node batched request, the
+  batched-mode replacement for per-shard sends; the single-shard-per-node and
+  BwC fallbacks funnel through `performPhaseOnShard` and are counted there).
+- `x-pack/plugin/inference/.../action/TransportGetInferenceFieldsInternalAction.java` —
+  `[CCS-DIAG] GetInferenceFieldsInternalAction` with `hasInput=` on **every**
+  request, including metadata-only ones (`input=null`). Diagnostic: does a
+  plain query on plain indices still pay this RPC?
+- Pre-existing on the branch: INFO logs in `InferenceQueryUtils`
+  (`LocalInferenceAsyncAction.executeInferenceRequest` — fires only on a
+  coordinator query rewrite that needs embeddings) and
+  `TransportInferenceAction.doInference` (the funnel point every inference
+  request passes through). Together they separate "who rewrote the query" from
+  "who executed inference":
+
+  | Mode | es-local | remote coordinator |
+  |---|---|---|
+  | `mrt=true` | both logs | both logs |
+  | `mrt=false` | both logs | `TransportInferenceAction` **only** |
+
+Harness files in this directory:
+
+| File | Purpose |
+|---|---|
+| `docker-compose.yml` | 1-node local cluster + 2-node remote cluster + mock inference server; static IPs for tc filters |
+| `mock_inference.py` | mock HuggingFace embedding server; counts calls (`GET :5000/count`, `POST :5000/reset`) |
+| `setup.sh` | endpoints, remote-cluster wiring, indices (semantic + plain), documents; `SHARDS=<n>` to size |
+| `count_calls.sh` | one measured search: applies settings, resets counters, prints response/took/inference-count/`[CCS-DIAG]` events |
+| `wan_latency.sh` | inject/clear netem delay on inter-cluster packets ONLY |
+| `sweep_shards.sh` | took vs shard count, batched vs unbatched, on the no-inference plain path |
 
 ## Topology
 
-| Container | Cluster | HTTP port | Notes |
-|---|---|---|---|
-| `es-local` | `local-cluster` | 9200 | single node, CCS coordinator |
-| `es-remote-1` | `remote-cluster` | 9201 | master |
-| `es-remote-2` | `remote-cluster` | 9202 | |
-| `mock-inference` | — | 5000 | mock HuggingFace embedding server, counts calls |
+| Container | Cluster | HTTP port | Static IP | Notes |
+|---|---|---|---|---|
+| `es-local` | `local-cluster` | 9200 | 172.28.0.10 | single node, CCS coordinator |
+| `es-remote-1` | `remote-cluster` | 9201 | 172.28.0.21 | master |
+| `es-remote-2` | `remote-cluster` | 9202 | 172.28.0.22 | |
+| `mock-inference` | — | 5000 | 172.28.0.5 | mock HF embedding server, counts calls |
 
-The remote cluster is registered on `es-local` as `remote-cluster-1`.
+The remote cluster is registered on `es-local` as `remote-cluster-1` (sniff mode,
+seeds on transport port 9300). Two index families, all `SHARDS` shards each
+(default 5), replicas 0:
 
-Indices (all mapped with a `body_semantic` `semantic_text` field backed by the
-`mock-hf` endpoint, which points at the mock server):
+- **semantic** (inference in play): `test-semantic` (local), `test-semantic-node1`,
+  `test-semantic-node2` (remote) — `body` text + `body_semantic` `semantic_text`
+  backed by the `mock-hf` endpoint pointing at the mock server.
+- **plain** (zero inference): `test-plain` (local), `test-plain-node1`,
+  `test-plain-node2` (remote) — `body` text only.
 
-- `test-semantic` — local, 5 shards
-- `test-semantic-node1` — remote, 5 shards
-- `test-semantic-node2` — remote, 5 shards
+Remote shards are allocated freely across both remote nodes (~SHARDS per node).
+Check placement:
 
-Remote shards are allocated freely across both remote nodes. To pin an index to
-one node (so `_index` in hits proves which node served them), add
+```bash
+curl "http://localhost:9201/_cat/shards/test-*?v&h=index,shard,state,docs,node"
+```
+
+To pin an index to one node add
 `"index.routing.allocation.require._name": "es-remote-1"` to its settings in
-`setup.sh` (a comment there marks the spot). Check actual placement with:
+`setup.sh`.
+
+## Replication, step by step
+
+### 0. Prerequisites
+
+- Docker (Docker Desktop on macOS is what the findings were measured on).
+- ~6GB free for the three ES containers (2GB heap each).
+- `nicolaka/netshoot` image (pulled automatically on first `wan_latency.sh` use).
+- JDK 25 via `JAVA_HOME` for the image build.
+
+### 1. Build the instrumented image
 
 ```bash
-curl "http://localhost:9201/_cat/shards/test-semantic-*?v&h=index,shard,state,docs,node"
-```
-
-## Running
-
-```bash
-# Build an image with the instrumentation (see "Logging" below), tag it "main"
-./gradlew :distribution:docker:buildAarch64DockerImage
+# from the repo root, on branch ccs-inference-check
+./gradlew :distribution:docker:buildAarch64DockerImage     # Apple silicon
+# ./gradlew :distribution:docker:buildDockerImage          # x86_64
 docker tag elasticsearch:9.6.0-SNAPSHOT elasticsearch:main
-
-# Terminal 1: start the stack (foreground, so you can watch the logs)
-IMAGE=elasticsearch:main docker compose up
-
-# Terminal 2: once healthy
-bash setup.sh
-
-./count_calls.sh --mode=local                          # expect 1
-./count_calls.sh --mode=ccs --mrt=true  --batched=true  # expect 2
-./count_calls.sh --mode=ccs --mrt=true  --batched=false # expect 2
-./count_calls.sh --mode=ccs --mrt=false --batched=true  # expect 2
-./count_calls.sh --mode=ccs --mrt=false --batched=false # expect 2
 ```
 
-`count_calls.sh` applies `search.batched_query_phase`, resets the mock's counter,
-runs the search, prints the full response and the inference call count.
-`setup.sh` resets the counter at the end so ingest-time calls don't pollute the
-first measurement.
+(Adjust the version tag if `main` has moved past 9.6.0.)
 
-Mock server API: `GET :5000/count`, `POST :5000/reset`, `GET :5000/health`.
+### 2. Start the stack and set it up
 
-## Invariant
+```bash
+cd dev-experiments/ccs-inference-count
+IMAGE=elasticsearch:main docker compose up -d
+bash setup.sh                    # waits for health, wires clusters, creates indices
+```
 
-**One inference call per cluster per search, never per shard or per node.**
-15 shards across 3 nodes still produce exactly 2 calls for a CCS query
-(1 local + 1 remote), in every mrt/batched combination. A per-shard regression
-would show up as ~15 calls.
+`SHARDS=20 bash setup.sh` re-creates all six indices with 20 shards each
+(deletes existing first; re-runnable any time).
 
-## Logging instrumentation
+### 3. Experiment 1 — inference call counting
 
-Two INFO logs (on this branch only — not for upstream):
+```bash
+./count_calls.sh --mode=local                            # expect 1 inference call
+./count_calls.sh --mode=ccs --mrt=true  --batched=true   # expect 2
+./count_calls.sh --mode=ccs --mrt=true  --batched=false  # expect 2
+./count_calls.sh --mode=ccs --mrt=false --batched=true   # expect 2
+./count_calls.sh --mode=ccs --mrt=false --batched=false  # expect 2
+```
 
-1. `InferenceQueryUtils` — in `LocalInferenceAsyncAction.executeInferenceRequest`.
-   Fires only when a node runs a **coordinator query rewrite** that needs embeddings.
-2. `TransportInferenceAction.doInference` — the funnel point every inference
-   request passes through, regardless of what triggered it.
+Invariant: **one inference call per cluster per search, never per shard or per
+node** — a per-shard regression would show as ~15 calls. `count_calls.sh` also
+prints `took` and the `[CCS-DIAG]` transport events scraped from all three
+containers' docker logs.
 
-The pair separates "who rewrote the query" from "who executed inference":
+### 4. Experiment 2 — transport fan-out, batched vs unbatched
 
-| Mode | es-local | remote coordinator |
+With the default 5 shards/index (5 local + 10 remote over 2 nodes), the
+`[CCS-DIAG]` section of `count_calls.sh --mode=ccs --mrt=false ...` should show:
+
+| | Shard query | Node-batched query |
 |---|---|---|
-| `mrt=true` | both logs | both logs |
-| `mrt=false` | both logs | `TransportInferenceAction` **only** |
+| `--batched=false` | 15 (5 local + 10 remote) | 0 |
+| `--batched=true` | 5 (local only) | 2 (one per remote node) |
 
-## Why the log signatures differ (mrt flow summary)
+Also compare `Phase bytes` requestBytes between the two modes: unbatched
+duplicates the full (rewritten) query per shard request; batched serializes it
+once per node. For the semantic path the rewritten query contains the KB-scale
+embedding, one per semantic clause.
+
+To ask "does a *plain* query still pay the GetInferenceFields RPC?":
+
+```bash
+./count_calls.sh --field=text --mrt=false --batched=true
+# then look for: GetInferenceFieldsInternalAction ... hasInput=false
+```
+
+### 5. Experiment 3 — WAN latency + shard sweep (the headline result)
+
+```bash
+./wan_latency.sh set 50     # 50ms one-way => ~100ms RTT, inter-cluster ONLY
+./wan_latency.sh ping       # verify: local->remote ~105ms, remote->remote ~0.1ms
+
+./sweep_shards.sh           # default 5 10 20 30 40 50 shards/index
+./sweep_shards.sh 5 25 50   # or custom counts
+
+./wan_latency.sh clear
+```
+
+The sweep uses the **plain** indices only (no inference anywhere), always
+mrt=false, and for each shard count recreates the indices, then runs
+1 warm-up + 2 measured searches per batched mode. Compare your table against
+"Findings" above; the wave prediction is
+`took ≈ base + (ceil(shards_per_index/5) − 1) × RTT` for batched=false and a
+flat `base` for batched=true. (shards_per_index ≈ shards per remote node:
+2 remote indices spread over 2 nodes.)
+
+### Gotchas
+
+- **`docker compose down`/`up` wipes everything**: cluster state (no volumes),
+  so re-run `setup.sh`; and the tc qdiscs (they live in the containers' network
+  namespaces), so re-run `wan_latency.sh set`. Same after an image rebuild.
+- **First search after a topology/latency change is slow** (connection
+  re-handshakes). Always warm up once and trust the later runs — the sweep does
+  this automatically.
+- **`wan_latency.sh` requires the static IPs** pinned in `docker-compose.yml`;
+  if you change them, update the script's constants.
+- `count_calls.sh --batched=...` sets the `search.batched_query_phase`
+  persistent cluster setting on the local cluster; `--batched=unset` removes it.
+- The mock counter accumulates across searches; `count_calls.sh` resets it
+  before each run, and `setup.sh` resets it after ingest.
+
+## Why the inference log signatures differ (mrt flow summary)
 
 **mrt=true**: the remote cluster's coordinator receives the full search request and
 independently runs the whole rewrite (including embedding the query text) —
@@ -103,18 +247,19 @@ The two call chains on the remote coordinator:
 ```
 mrt=true  (remote receives a full search request and rewrites it):
   search rewrite phase
-    → LocalInferenceAsyncAction.executeInferenceRequest      ← log #1 fires
+    → LocalInferenceAsyncAction.executeInferenceRequest      ← rewrite log fires
       → InferenceQueryUtils.executeInferenceForTaskType (static)
         → InferenceAction
-          → TransportInferenceAction.doInference             ← log #2 fires
+          → TransportInferenceAction.doInference             ← inference log fires
 
 mrt=false (remote receives the GetInferenceFields RPC; no search rewrite):
   TransportGetInferenceFieldsInternalAction.getInferenceResults
     → InferenceQueryUtils.executeInferenceForTaskType (static)  ← same shared helper
       → InferenceAction
-        → TransportInferenceAction.doInference               ← only log #2 fires
+        → TransportInferenceAction.doInference               ← only inference log fires
 ```
 
 Both paths converge on the same static helper; only the caller differs. The
-`GetInferenceFieldsInternalAction` RPC is also the extra per-query roundtrip at
-the center of the #146908 latency regression.
+`GetInferenceFieldsInternalAction` RPC is the extra per-query roundtrip that is
+unique to mrt=false — but it is constant (1 RTT) and unaffected by batching;
+the shard fan-out waves above are what scale with cluster size.

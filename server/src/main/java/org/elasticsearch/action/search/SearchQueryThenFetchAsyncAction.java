@@ -574,6 +574,12 @@ public class SearchQueryThenFetchAsyncAction extends AbstractSearchAsyncAction<S
                 connection,
                 this::trackPhaseRequestBytesWritten
             );
+            logger.info(
+                "[CCS-DIAG] Node-batched query: cluster={} targetNode={} shards={}",
+                routing.clusterAlias(),
+                nodeId,
+                request.shards.size()
+            );
             searchTransportService.transportService()
                 .sendChildRequest(connection, NODE_SEARCH_ACTION_NAME, wrapper, task, new TransportResponseHandler<NodeQueryResponse>() {
                     @Override

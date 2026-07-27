@@ -312,6 +312,7 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
             shardListener.onFailure(e);
             return;
         }
+        logger.info("[CCS-DIAG] Shard query: phase={} shard={} cluster={}", getName(), shardIt.shardId(), shard.getClusterAlias());
         executePhaseOnShard(shardIt, connection, shardListener);
     }
 
@@ -383,6 +384,14 @@ abstract class AbstractSearchAsyncAction<Result extends SearchPhaseResult> exten
             }
             long resultBytes = phaseResultBytesRead.sumThenReset();
             long requestBytes = phaseRequestBytesWritten.sumThenReset();
+            if (requestBytes > 0 || resultBytes > 0) {
+                logger.info(
+                    "[CCS-DIAG] Phase bytes: phase={} requestBytes={} resultBytes={}",
+                    currentPhase,
+                    requestBytes,
+                    resultBytes
+                );
+            }
             // bytes tracked is 0 in the following scenarios:
             // - all requests/responses were local
             // - for the expand phase whose sub-searches are tracked separately
