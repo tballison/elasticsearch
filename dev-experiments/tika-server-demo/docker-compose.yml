@@ -1,0 +1,65 @@
+# Two profiles, run ONE AT A TIME (both ES nodes bind :9200):
+#   docker compose --profile jvm    up     # in-JVM node        -> localhost:9200
+#   docker compose --profile server up     # tika-server + es   -> localhost:9200  (tika :9998)
+# Run in the foreground (no -d) and this window becomes your log stream.
+services:
+
+  # ---- Part 1: in-JVM (profile: jvm) --------------------------------------------------------------
+  # No tika_server.url -> LocalExtractionBackend. A runaway parse burns CPU / OOMs THIS node.
+  es-jvm:
+    profiles: ["jvm"]
+    image: ${ES_IMAGE}:${STACK_VERSION}
+    volumes:
+      - ./es-jvm.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+    ports:
+      - "9200:9200"
+    environment:
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    mem_limit: 2g
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+
+  # ---- Part 2: tika-server (profile: server) ------------------------------------------------------
+  # tika runs each parse in a forked JVM; a bad doc crashes only the fork and tika restarts it.
+  tika:
+    profiles: ["server"]
+    image: apache/tika:${TIKA_VERSION:-4.0.0-SNAPSHOT-full}
+    volumes:
+      - ./tika-config.json:/opt/tika-server/tika-config.json:ro
+      # /tika-extras/* is on the -full image's classpath -> supplies MockParser + mock+xml detection.
+      - ./libs/tika-core-tests.jar:/tika-extras/tika-core-tests.jar:ro
+    command: ["-c", "/opt/tika-server/tika-config.json"]
+    ports:
+      - "9998:9998"
+    mem_limit: 4g
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/localhost/9998 && printf 'GET /tika HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q 'Apache Tika' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  es-server:
+    profiles: ["server"]
+    image: ${ES_IMAGE}:${STACK_VERSION}
+    depends_on:
+      tika:
+        condition: service_healthy
+    volumes:
+      - ./es-server.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+    ports:
+      - "9200:9200"
+    environment:
+      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+    mem_limit: 2g
+    ulimits:
+      memlock: { soft: -1, hard: -1 }
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 10s
+      timeout: 10s
+      retries: 30

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mock>
+    <!-- <oom/> allocates int[] in an unbounded loop -> OutOfMemoryError.
+         On the tika-server node it OOMs the forked parser JVM (-Xmx1g) -> the fork crashes, server survives.
+         On the in-JVM node it OOMs the ES process itself. The <?xml?> declaration is required (see cpu.xml). -->
+    <oom/>
+</mock>

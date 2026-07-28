@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mock>
+    <!-- A well-behaved document: writes a little content and returns immediately.
+         Use to show recovery after a crash (the forked parser has already respawned). -->
+    <write element="p">hello from MockParser</write>
+</mock>

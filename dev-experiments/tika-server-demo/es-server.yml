@@ -1,0 +1,14 @@
+cluster.name: tika-demo-server
+node.name: es-server
+discovery.type: single-node
+network.host: 0.0.0.0
+
+# Security disabled for local demo
+xpack.security.enabled: false
+xpack.license.self_generated.type: basic
+
+# Route extraction to the external tika-server -> TikaServerExtractionBackend (async HTTP).
+ingest.attachment.tika_server.url: http://tika:9998
+# ES gives up on the HTTP call after this. tika-server's own progressTimeoutMillis (10s in
+# tika-config.json) fires first and kills the forked parse, so ES sees the failure ~then.
+ingest.attachment.tika_server.timeout: 90s

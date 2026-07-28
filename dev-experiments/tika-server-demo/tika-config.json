@@ -1,0 +1,32 @@
+{
+  "server": {
+    "port": 9998,
+    "host": "0.0.0.0"
+  },
+  "pipes": {
+    "numClients": 4,
+    "forkedJvmArgs": ["-Xmx1g"]
+  },
+  "parse-context": {
+    "timeout-limits": {
+      "totalTaskTimeoutMillis": 20000,
+      "progressTimeoutMillis": 10000
+    },
+    "standard-metadata-limiter-factory": {
+      "includeFields": [
+        "X-TIKA:detected_language",
+        "dcterms:created",
+        "dcterms:modified",
+        "dc:title",
+        "dc:creator",
+        "dc:subject",
+        "dc:description",
+        "dc:format",
+        "dc:identifier",
+        "Author",
+        "Keywords",
+        "Comments"
+      ]
+    }
+  }
+}

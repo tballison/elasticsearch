@@ -1,0 +1,13 @@
+cluster.name: tika-demo-jvm
+node.name: es-jvm
+discovery.type: single-node
+network.host: 0.0.0.0
+
+# Security disabled for local demo
+xpack.security.enabled: false
+xpack.license.self_generated.type: basic
+
+# NOTE: ingest.attachment.tika_server.url is intentionally ABSENT.
+# With no URL, the plugin uses LocalExtractionBackend -> Tika runs IN this JVM,
+# synchronously on the ingest/write thread, with NO timeout. A runaway parse
+# keeps burning CPU on THIS node even after the client request gives up.

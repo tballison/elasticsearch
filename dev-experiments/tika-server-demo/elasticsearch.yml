@@ -1,0 +1,12 @@
+cluster.name: tika-demo
+node.name: es01
+discovery.type: single-node
+network.host: 0.0.0.0
+
+# Security disabled for local demo
+xpack.security.enabled: false
+xpack.license.self_generated.type: basic
+
+# Route all attachment extraction through the external tika-server.
+# Remove this line to fall back to in-JVM Tika extraction.
+ingest.attachment.tika_server.url: http://tika:9998

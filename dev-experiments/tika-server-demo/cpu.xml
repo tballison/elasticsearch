@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mock>
+    <!--
+      MockParser action reference (org.apache.tika.parser.mock.MockParser, in tika-core-*-tests.jar).
+      This doc is detected as application/mock+xml (root element <mock>) and routed to MockParser.
+      NOTE: the <?xml?> declaration above is REQUIRED — Tika only runs root-XML detection (which maps
+      <mock> -> application/mock+xml) once it recognizes the bytes as XML. Without it the doc is
+      detected as text/plain and parsed by TXTParser (no MockParser, no hang). Verified against tika 4.x.
+
+      <hang heavy="true" .../> runs a pure-CPU busy loop (hangHeavy): division + new Date() in the inner
+      loop, for ~millis. Set millis large so the parse outlives any client/request timeout.
+    -->
+    <hang heavy="true" millis="3600000" pulse_millis="1000"/>
+</mock>

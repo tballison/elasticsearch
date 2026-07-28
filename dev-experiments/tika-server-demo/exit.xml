@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mock>
+    <!-- <system_exit/> calls System.exit(1). On the tika-server node this crashes the forked parser
+         instantly (status=UNSPECIFIED_CRASH) and tika respawns it; the server container stays up. -->
+    <system_exit/>
+</mock>

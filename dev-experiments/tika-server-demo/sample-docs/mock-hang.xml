@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mock>
+    <!-- hangs for 90s — longer than totalTaskTimeoutMillis=60s in tika-config.json -->
+    <hang millis="90000" heavy="false" interruptible="true"/>
+</mock>

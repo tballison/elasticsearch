@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mock>
+    <!-- calls System.exit(1) — kills the forked child process;
+         the pipes server should spawn a replacement and return an error for this request -->
+    <system_exit/>
+</mock>
