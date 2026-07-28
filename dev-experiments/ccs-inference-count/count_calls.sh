@@ -10,6 +10,10 @@
 #   --batched=true    search.batched_query_phase (unset = remove override)
 #   --field=semantic  semantic (test-semantic* / body_semantic, inference in play)
 #                     | text (test-plain* / body, zero inference involvement)
+#   --bool=false      true = 3-clause bool/should instead of a single match clause.
+#                     On the semantic path each clause needs its own embedding:
+#                     expect 3x GetInferenceFieldsInternalAction (hasInput=true) and
+#                     6 inference calls (3 clauses x 2 clusters) with mrt=false.
 set -euo pipefail
 
 LOCAL=http://localhost:9200
@@ -20,6 +24,7 @@ MODE=ccs
 MRT=true
 BATCHED=true
 FIELD=semantic
+BOOL=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -27,6 +32,7 @@ for arg in "$@"; do
         --mrt=*)    MRT="${arg#--mrt=}" ;;
         --batched=*) BATCHED="${arg#--batched=}" ;;
         --field=*)  FIELD="${arg#--field=}" ;;
+        --bool=*)   BOOL="${arg#--bool=}" ;;
         *) echo "Unknown argument: $arg" >&2; exit 1 ;;
     esac
 done
@@ -47,7 +53,7 @@ else
     INDICES="$LOCAL_INDEX,$REMOTE_INDICES"
 fi
 
-echo "=== mode=$MODE mrt=$MRT batched=$BATCHED field=$FIELD ==="
+echo "=== mode=$MODE mrt=$MRT batched=$BATCHED field=$FIELD bool=$BOOL ==="
 
 # Apply (or remove) the batched_query_phase cluster setting
 if [[ "$BATCHED" == "unset" ]]; then
@@ -65,9 +71,11 @@ curl -sf -XPOST "$MOCK/reset" > /dev/null
 
 # Build search URL
 SEARCH_URL="$LOCAL/$INDICES/_search?ccs_minimize_roundtrips=$MRT"
-SEARCH_BODY='{"size":20,"query":{"match":{"'"$QUERY_FIELD"'":"brown fox"}}}'
-# Three OR clauses — uncomment to test if each clause triggers a separate inference call per cluster (expect 6 total)
-#SEARCH_BODY='{"size":20,"query":{"bool":{"should":[{"match":{"body_semantic":"brown fox"}},{"match":{"body_semantic":"boxing wizards"}},{"match":{"body_semantic":"sphinx quartz"}}]}}}'
+if [[ "$BOOL" == "true" ]]; then
+    SEARCH_BODY='{"size":20,"query":{"bool":{"should":[{"match":{"'"$QUERY_FIELD"'":"brown fox"}},{"match":{"'"$QUERY_FIELD"'":"boxing wizards"}},{"match":{"'"$QUERY_FIELD"'":"sphinx quartz"}}]}}}'
+else
+    SEARCH_BODY='{"size":20,"query":{"match":{"'"$QUERY_FIELD"'":"brown fox"}}}'
+fi
 
 echo "--- request: GET $SEARCH_URL"
 echo "    body: $SEARCH_BODY"

@@ -30,7 +30,7 @@ services:
       - xpack.license.self_generated.type=trial
       - cluster.name=local-cluster
       - node.name=es-local
-      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g -Des.index.max_number_of_shards=20000
       - node.store.allow_mmap=false
     ports:
       - "9200:9200"
@@ -56,7 +56,7 @@ services:
       - xpack.license.self_generated.type=trial
       - cluster.name=remote-cluster
       - node.name=es-remote-1
-      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g -Des.index.max_number_of_shards=20000
       - node.store.allow_mmap=false
       - discovery.seed_hosts=es-remote-1,es-remote-2
       - cluster.initial_master_nodes=es-remote-1
@@ -84,7 +84,7 @@ services:
       - xpack.license.self_generated.type=trial
       - cluster.name=remote-cluster
       - node.name=es-remote-2
-      - ES_JAVA_OPTS=-Xms2g -Xmx2g
+      - ES_JAVA_OPTS=-Xms2g -Xmx2g -Des.index.max_number_of_shards=20000
       - node.store.allow_mmap=false
       - discovery.seed_hosts=es-remote-1,es-remote-2
       - cluster.initial_master_nodes=es-remote-1
