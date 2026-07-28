@@ -31,8 +31,24 @@ the inter-cluster link only, 15 tiny documents total:
 
 Unbatched `took` fits `base + (ceil(shards_per_node/5) − 1) × RTT` almost
 exactly; batched stays flat at the ~445ms base regardless of shard count.
-Extrapolated to production scale, 100 shards/node on a 50ms one-way link is
-+19 RTT ≈ +2s — "dramatic" — and disappears entirely with batching.
+At 1000 remote shards (~500/node, 100 waves) the model still holds within 1%:
+**10.9–11.0s unbatched vs 0.43–0.77s batched (~15–25×)**. (Batched picks up a
+small fixed bump past 128 shards — can_match pre-filter — plus visible per-node
+execution cost at high shard counts; still sub-second.)
+
+Additional controls, all measured on this harness:
+
+- **mrt=true**: flat ~115ms (≈1 WAN round trip) at every shard count, in both
+  batching modes — the scaling penalty is specific to the mrt=false per-shard
+  WAN fan-out. (mrt=false matters because it is forced for PIT, scroll, etc.)
+- **Index count is irrelevant**: 100 indices × 10 shards and 2 indices × 500
+  shards time identically. Both fan-out layers group by node, never by index
+  (`SendingTarget(clusterAlias, nodeId)`); only shards-per-node matters.
+- **Clause count is orthogonal**: a 1000-clause bool query (unique tokens per
+  clause to defeat clause dedup) adds ~1.2s of per-shard parse compute to BOTH
+  modes equally; the batched-vs-unbatched gap stays fixed at waves × RTT.
+- `search.batched_query_phase` is **enabled by default since 9.5.0** (#148622;
+  the setting was introduced in #121885).
 
 **Mechanism** (`SearchQueryThenFetchAsyncAction.doRun`, ~line 503): unbatched,
 the coordinator sends one transport request **per shard**, throttled to
@@ -42,6 +58,13 @@ with N shards therefore costs ceil(N/5) sequential round trips. Batched, shards
 are grouped by `(clusterAlias, nodeId)` and sent as **one**
 `indices:data/read/search[query][n]` request per node, partially reduced on the
 data node. Coordinator-local shards always go per-shard (no network latency).
+
+Note "waves" is emergent, not a barrier: `PendingExecutions` is a per-node
+`Semaphore(5)` sliding window (`AbstractSearchAsyncAction.java:926`) — each
+response frees its slot and dispatches the next queued shard immediately. Under
+uniform RTT (netem) the window degenerates into synchronized batches of 5;
+under real-world jitter the chains desynchronize but total time still scales
+as ~ceil(N/5) × RTT.
 
 **Ruled out as the mechanism**: inference-call count (the mock counter shows
 2 calls — 1 local + 1 remote — in every mrt/batched combination) and the
@@ -90,9 +113,9 @@ Harness files in this directory:
 | `docker-compose.yml` | 1-node local cluster + 2-node remote cluster + mock inference server; static IPs for tc filters |
 | `mock_inference.py` | mock HuggingFace embedding server; counts calls (`GET :5000/count`, `POST :5000/reset`) |
 | `setup.sh` | endpoints, remote-cluster wiring, indices (semantic + plain), documents; `SHARDS=<n>` to size |
-| `count_calls.sh` | one measured search: applies settings, resets counters, prints response/took/inference-count/`[CCS-DIAG]` events |
+| `count_calls.sh` | one measured search: applies settings, resets counters, prints response/took/inference-count/`[CCS-DIAG]` events; `--field=semantic\|text`, `--bool=true` for 3 semantic/plain clauses |
 | `wan_latency.sh` | inject/clear netem delay on inter-cluster packets ONLY |
-| `sweep_shards.sh` | took vs shard count, batched vs unbatched, on the no-inference plain path |
+| `sweep_shards.sh` | took vs shard count, batched vs unbatched, on the no-inference plain path; knobs: `NIDX` (remote index count), `CLAUSES` (generated bool clauses), `MRT`, `BOOL` |
 
 ## Topology
 
@@ -195,22 +218,32 @@ To ask "does a *plain* query still pay the GetInferenceFields RPC?":
 ### 5. Experiment 3 — WAN latency + shard sweep (the headline result)
 
 ```bash
-./wan_latency.sh set 50     # 50ms one-way => ~100ms RTT, inter-cluster ONLY
-./wan_latency.sh ping       # verify: local->remote ~105ms, remote->remote ~0.1ms
+./wan_latency.sh set 50       # 50ms one-way => ~100ms RTT, inter-cluster ONLY
+./wan_latency.sh ping         # verify: local->remote ~105ms, remote->remote ~0.1ms
 
-./sweep_shards.sh           # default 5 10 20 30 40 50 shards/index
-./sweep_shards.sh 5 25 50   # or custom counts
+./sweep_shards.sh             # default 10 100 1000 10000 shards/index
+./sweep_shards.sh 5 25 50     # custom shards-per-index counts
+NIDX=100 ./sweep_shards.sh 10 # 100 remote indices x 10 shards (vs NIDX=2 500 — identical)
+MRT=true ./sweep_shards.sh    # control: flat ~1 RTT at every count
+CLAUSES=1000 ./sweep_shards.sh 500   # generated 1000-clause bool query
 
 ./wan_latency.sh clear
 ```
 
-The sweep uses the **plain** indices only (no inference anywhere), always
-mrt=false, and for each shard count recreates the indices, then runs
-1 warm-up + 2 measured searches per batched mode. Compare your table against
-"Findings" above; the wave prediction is
-`took ≈ base + (ceil(shards_per_index/5) − 1) × RTT` for batched=false and a
-flat `base` for batched=true. (shards_per_index ≈ shards per remote node:
-2 remote indices spread over 2 nodes.)
+The sweep creates its own plain indices — `test-plain` (local) plus `NIDX`
+remote indices `test-plain-r1..rN` of the given shard count each (no inference
+anywhere) — and for each count runs 1 warm-up + 2 measured searches per batched
+mode. It automatically raises `cluster.max_shards_per_node` to fit and sets
+`action.destructive_requires_name=false` (dev harness) for wildcard cleanup.
+Wave prediction: `took ≈ base + (ceil(shards_per_node/5) − 1) × RTT` for
+batched=false, flat `base` for batched=true; shards_per_node ≈
+shards_per_index × NIDX / 2.
+
+Counts above 1024 shards/index need the `-Des.index.max_number_of_shards=20000`
+already present in `docker-compose.yml`'s `ES_JAVA_OPTS` (a compose down/up is
+required for it to take effect). Fair warning: 10000/idx = 30k shards on three
+2GB-heap containers is far past sizing guidance and may fall over; bump heap or
+stop at ~1000/idx.
 
 ### Gotchas
 
