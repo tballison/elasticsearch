@@ -9,13 +9,22 @@
 package org.elasticsearch.action.search;
 
 import org.elasticsearch.TransportVersion;
+import org.elasticsearch.common.breaker.NoopCircuitBreaker;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
+import org.elasticsearch.common.util.concurrent.BudgetedTaskRunner;
+import org.elasticsearch.common.util.concurrent.MemoryBudget;
+import org.elasticsearch.core.Releasable;
+import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.transport.AbstractTransportRequest;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.greaterThan;
@@ -91,5 +100,68 @@ public class SearchTransportServiceTests extends ESTestCase {
         // Two ints = 8 bytes
         assertThat(counted[0], equalTo(8L));
         assertThat(out.size(), equalTo(8));
+    }
+
+    /**
+     * Under a flood, the free_context {@link BudgetedTaskRunner} admits at most
+     * {@code budget / taskWeight} tasks (REJECT policy) and calls {@code onFailure} for the rest.
+     * Uses a paused executor to hold budget open during the flood — inline execution would
+     * cycle the budget back to zero between submissions, masking the plateau.
+     */
+    public void testFreeContextBudgetBoundsQueueUnderFlood() {
+        final long taskBytes = SearchTransportService.FREE_CONTEXT_TASK_BYTES;
+        final long budgetBytes = taskBytes * 5;
+        final int taskCount = 20;
+        final int maxAdmitted = (int) (budgetBytes / taskBytes);
+
+        final List<Runnable> pausedQueue = new CopyOnWriteArrayList<>();
+
+        var budget = new MemoryBudget(
+            "free_context_test",
+            budgetBytes,
+            new NoopCircuitBreaker("free_context_test"),
+            () -> 0L,
+            null,
+            null,
+            TimeValue.timeValueSeconds(60),
+            null,
+            null
+        );
+        var runner = new BudgetedTaskRunner<BudgetedTaskRunner.WeighedTask>(
+            "free_context_test",
+            Integer.MAX_VALUE,
+            pausedQueue::add,
+            budget,
+            BudgetedTaskRunner.OverloadPolicy.REJECT
+        );
+
+        final AtomicInteger rejected = new AtomicInteger();
+        final List<Releasable> openSlots = new ArrayList<>();
+        for (int i = 0; i < taskCount; i++) {
+            runner.enqueueTask(new BudgetedTaskRunner.WeighedTask() {
+                @Override
+                public long ramBytesUsed() {
+                    return taskBytes;
+                }
+
+                @Override
+                public void onResponse(Releasable slot) {
+                    openSlots.add(slot);
+                }
+
+                @Override
+                public void onFailure(Exception e) {
+                    rejected.incrementAndGet();
+                }
+            });
+        }
+
+        assertThat("excess tasks rejected", rejected.get(), equalTo(taskCount - maxAdmitted));
+        assertThat("budget at plateau", budget.current(), equalTo((long) maxAdmitted * taskBytes));
+
+        pausedQueue.forEach(Runnable::run);
+        assertThat("all admitted tasks ran", openSlots.size(), equalTo(maxAdmitted));
+        openSlots.forEach(Releasable::close);
+        assertThat("budget fully drained after release", budget.current(), equalTo(0L));
     }
 }
