@@ -32,6 +32,7 @@ import org.elasticsearch.common.io.stream.RecyclerBytesStreamOutput;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
+import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.AbstractRunnable;
 import org.elasticsearch.common.util.concurrent.BudgetedTaskRunner;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
@@ -538,14 +539,15 @@ public class SearchTransportService {
     public static void registerRequestHandler(
         TransportService transportService,
         SearchService searchService,
-        NamedWriteableRegistry namedWriteableRegistry
+        NamedWriteableRegistry namedWriteableRegistry,
+        Settings settings
     ) {
         final TransportRequestHandler<ScrollFreeContextRequest> freeContextHandler = (request, channel, task) -> {
             boolean freed = searchService.freeReaderContext(request.id());
             logger.trace("releasing search context [{}], [{}]", request.id(), freed);
             channel.sendResponse(SearchFreeContextResponse.of(freed));
         };
-        final Executor freeContextExecutor = buildFreeContextExecutor(transportService);
+        final Executor freeContextExecutor = buildFreeContextExecutor(transportService, settings);
         transportService.registerRequestHandler(
             FREE_CONTEXT_SCROLL_ACTION_NAME,
             freeContextExecutor,
@@ -875,7 +877,12 @@ public class SearchTransportService {
     /** Conservative fixed weight per free_context task (request + channel wrapper + overhead). Package-private for tests. */
     static final long FREE_CONTEXT_TASK_BYTES = 4 * 1024; // 4 KB
 
-    private static Executor buildFreeContextExecutor(TransportService transportService) {
+    // package-private for testing
+    static int freeContextConcurrency(Settings settings) {
+        return Math.max(1, EsExecutors.allocatedProcessors(settings) / 2);
+    }
+
+    private static Executor buildFreeContextExecutor(TransportService transportService, Settings settings) {
         // Budget: min(32 MB, heap/256) — generous by design; the goal is accountedness, not
         // right-sizing. A rejected free_context is safe: scroll keepalive / timeout cleans up
         // the reader context. Unguarded ThrottledTaskRunner caused INC-3482 (GBs of heap).
@@ -894,7 +901,7 @@ public class SearchTransportService {
         );
         final BudgetedTaskRunner<BudgetedTaskRunner.WeighedTask> runner = new BudgetedTaskRunner<>(
             "free_context",
-            1,
+            freeContextConcurrency(settings),
             transportService.getThreadPool().generic(),
             budget,
             BudgetedTaskRunner.OverloadPolicy.REJECT
