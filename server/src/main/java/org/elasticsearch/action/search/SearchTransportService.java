@@ -24,6 +24,7 @@ import org.elasticsearch.client.internal.OriginSettingClient;
 import org.elasticsearch.client.internal.node.NodeClient;
 import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.common.breaker.CircuitBreaker;
+import org.elasticsearch.common.breaker.NoopCircuitBreaker;
 import org.elasticsearch.common.bytes.ReleasableBytesReference;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
@@ -33,10 +34,11 @@ import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.AbstractRunnable;
+import org.elasticsearch.common.util.concurrent.BudgetedTaskRunner;
 import org.elasticsearch.common.util.concurrent.ConcurrentCollections;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
+import org.elasticsearch.common.util.concurrent.MemoryBudget;
 import org.elasticsearch.common.util.concurrent.ThreadContext;
-import org.elasticsearch.common.util.concurrent.ThrottledTaskRunner;
 import org.elasticsearch.core.Nullable;
 import org.elasticsearch.core.Releasable;
 import org.elasticsearch.core.Releasables;
@@ -872,33 +874,60 @@ public class SearchTransportService {
         }
     }
 
+    /** Conservative fixed weight per free_context task (request + channel wrapper + overhead). Package-private for tests. */
+    static final long FREE_CONTEXT_TASK_BYTES = 4 * 1024; // 4 KB
+
     // package-private for testing
     static int freeContextConcurrency(Settings settings) {
         return Math.max(1, EsExecutors.allocatedProcessors(settings) / 2);
     }
 
     private static Executor buildFreeContextExecutor(TransportService transportService, Settings settings) {
-        final ThrottledTaskRunner throttledTaskRunner = new ThrottledTaskRunner(
+        // Budget: min(32 MB, heap/256) — generous by design; the goal is accountedness, not
+        // right-sizing. A rejected free_context is safe: scroll keepalive / timeout cleans up
+        // the reader context. Unguarded ThrottledTaskRunner caused INC-3482 (GBs of heap).
+        final long heapBytes = Runtime.getRuntime().maxMemory();
+        final long budgetBytes = Math.min(32L * 1024 * 1024, heapBytes / 256);
+        final MemoryBudget budget = new MemoryBudget(
+            "free_context",
+            budgetBytes,
+            new NoopCircuitBreaker("free_context"), // PoC; production uses a registered child breaker
+            transportService.getThreadPool()::relativeTimeInMillis,
+            null, // stall detection not needed: REJECT keeps the budget queue empty
+            null,
+            org.elasticsearch.core.TimeValue.timeValueSeconds(60),
+            null,
+            null
+        );
+        final BudgetedTaskRunner<BudgetedTaskRunner.WeighedTask> runner = new BudgetedTaskRunner<>(
             "free_context",
             freeContextConcurrency(settings),
-            transportService.getThreadPool().generic()
+            transportService.getThreadPool().generic(),
+            budget,
+            BudgetedTaskRunner.OverloadPolicy.REJECT
         );
-        return r -> throttledTaskRunner.enqueueTask(new ActionListener<>() {
+        return r -> runner.enqueueTask(new BudgetedTaskRunner.WeighedTask() {
             @Override
-            public void onResponse(Releasable releasable) {
-                try (releasable) {
+            public long ramBytesUsed() {
+                return FREE_CONTEXT_TASK_BYTES;
+            }
+
+            @Override
+            public void onResponse(Releasable slot) {
+                try (slot) {
                     r.run();
                 }
             }
 
             @Override
             public void onFailure(Exception e) {
-                if (r instanceof AbstractRunnable abstractRunnable) {
-                    abstractRunnable.onFailure(e);
+                // Must use onRejection, not onFailure: the AbstractRunnable created by
+                // handleRequestForking has assert false in onFailure; onRejection calls sendErrorResponse.
+                if (r instanceof AbstractRunnable ar) {
+                    ar.onRejection(e);
+                } else {
+                    logger.warn("free_context task rejected but runnable is not AbstractRunnable: {}", r, e);
                 }
-                // should be impossible, GENERIC pool doesn't reject anything
-                logger.error("unexpected failure running " + r, e);
-                assert false : new AssertionError("unexpected failure running " + r, e);
             }
         });
     }
