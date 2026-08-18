@@ -304,6 +304,45 @@ public class MemoryBudgetTests extends ESTestCase {
     }
 
     // -------------------------------------------------------------------------
+    // High-water marks
+    // -------------------------------------------------------------------------
+
+    /** Peaks record the transient max between reads; a sampled gauge would miss it after release. */
+    public void testPeaksRecordTransientsAndResetToInstantaneous() {
+        var budget = budgetWithLimit(100);
+        List<Releasable> granted = new ArrayList<>();
+        List<Releasable> queuedGrants = new CopyOnWriteArrayList<>();
+        budget.acquire(80, INLINE_GRANTS, collectTo(granted));
+        budget.acquire(50, INLINE_GRANTS, collectTo(queuedGrants)); // queues: waiting=50
+        budget.acquire(30, INLINE_GRANTS, collectTo(queuedGrants)); // queues: waiting=80
+        granted.forEach(Releasable::close); // drains both waiters inline
+        queuedGrants.forEach(Releasable::close);
+        assertThat(budget.current(), equalTo(0L));
+        assertThat(budget.waiting(), equalTo(0L));
+
+        assertThat(budget.peakCurrentAndReset(), equalTo(80L));
+        assertThat(budget.peakWaitingAndReset(), equalTo(80L));
+        // window reset to instantaneous (0) — quiet period reports no phantom peak
+        assertThat(budget.peakCurrentAndReset(), equalTo(0L));
+        assertThat(budget.peakWaitingAndReset(), equalTo(0L));
+    }
+
+    /** Reset lands on the instantaneous value, not zero: bytes still held must stay visible as the floor. */
+    public void testPeakResetKeepsHeldBytesAsFloor() {
+        var budget = budgetWithLimit(100);
+        List<Releasable> granted = new ArrayList<>();
+        budget.acquire(70, INLINE_GRANTS, collectTo(granted));
+        Releasable transientGrant = budget.tryAcquire(20);
+        assertThat(transientGrant, notNullValue());
+        transientGrant.close();
+
+        assertThat(budget.peakCurrentAndReset(), equalTo(90L));
+        // 70 still held: next window starts at 70, not 0
+        assertThat(budget.peakCurrentAndReset(), equalTo(70L));
+        granted.forEach(Releasable::close);
+    }
+
+    // -------------------------------------------------------------------------
     // Stall detection with virtual clock
     // -------------------------------------------------------------------------
 

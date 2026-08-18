@@ -17,6 +17,10 @@ That logic was extracted into:
   Stall detection uses `org.elasticsearch.threadpool.Scheduler` (the interface `ThreadPool`
   already implements) rather than a custom boolean-returning inner interface.
 
+- High-water marks (added 2026-08-17): `peakCurrentAndReset()` / `peakWaitingAndReset()`
+  — max since last read, reset to instantaneous (held bytes stay as floor). Near-miss
+  telemetry: sampled gauges miss transients between scrapes. Single-scraper semantics.
+
 - **`BudgetedTaskRunner`** (112 LOC, server) — composes `MemoryBudget` with
   `ThrottledTaskRunner`. Provides `REJECT` and `DEFER` overload policies. The `REJECT`
   path uses a pre-built shared `EsRejectedExecutionException` (stackless by design);

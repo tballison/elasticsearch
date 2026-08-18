@@ -83,6 +83,9 @@ public class MemoryBudget {
     // volatile so current() / waiting() skip the lock for monitoring reads
     private volatile long currentBytes = 0;
     private volatile long waitingBytes = 0;
+    // high-water marks since last read; sampled gauges miss transients between scrapes
+    private long peakCurrentBytes = 0;
+    private long peakWaitingBytes = 0;
     private long lastReleaseMillis;
     private boolean stallCheckScheduled = false;
     private final ArrayDeque<Waiter> waiters = new ArrayDeque<>();
@@ -136,6 +139,7 @@ public class MemoryBudget {
             } else {
                 waiters.addLast(new Waiter(bytes, executor, listener));
                 waitingBytes += bytes;
+                peakWaitingBytes = Math.max(peakWaitingBytes, waitingBytes);
                 if (waitingBytesHook != null) {
                     waitingBytesHook.accept(bytes);
                 }
@@ -180,6 +184,28 @@ public class MemoryBudget {
     public int waiterCount() {
         synchronized (mutex) {
             return waiters.size();
+        }
+    }
+
+    /**
+     * Max admitted bytes since the last call; resets the window to the instantaneous value.
+     * Captures transients a sampled {@link #current()} would miss. Single-scraper semantics:
+     * concurrent readers split the window between them.
+     */
+    public long peakCurrentAndReset() {
+        synchronized (mutex) {
+            final long peak = peakCurrentBytes;
+            peakCurrentBytes = currentBytes;
+            return peak;
+        }
+    }
+
+    /** Max waiting bytes since the last call; see {@link #peakCurrentAndReset} for semantics. */
+    public long peakWaitingAndReset() {
+        synchronized (mutex) {
+            final long peak = peakWaitingBytes;
+            peakWaitingBytes = waitingBytes;
+            return peak;
         }
     }
 
@@ -239,6 +265,7 @@ public class MemoryBudget {
             }
         }
         currentBytes += bytes;
+        peakCurrentBytes = Math.max(peakCurrentBytes, currentBytes);
         if (currentBytesHook != null) {
             currentBytesHook.accept(bytes);
         }
