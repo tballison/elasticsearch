@@ -7,14 +7,13 @@
 
 package org.elasticsearch.xpack.stateless.cache.reader;
 
-import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.breaker.NoopCircuitBreaker;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeValue;
+import org.elasticsearch.common.util.concurrent.MemoryBudget;
 import org.elasticsearch.core.Releasable;
-import org.elasticsearch.core.Releasables;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.logging.LogManager;
 import org.elasticsearch.logging.Logger;
@@ -22,9 +21,6 @@ import org.elasticsearch.telemetry.metric.LongUpDownCounter;
 import org.elasticsearch.telemetry.metric.MeterRegistry;
 import org.elasticsearch.threadpool.ThreadPool;
 
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.concurrent.Executor;
 
 /**
@@ -43,6 +39,10 @@ import java.util.concurrent.Executor;
  *
  * No shutdown handling: queued listeners must tolerate never completing (all acquirers are speculative fills, for which this is
  * inherent anyway).
+ *
+ * Thin adapter over {@link MemoryBudget}: all locking, FIFO grant/release, and stall detection
+ * logic live in the shared primitive; this class keeps the stateless-specific settings, APM metrics,
+ * and log message text.
  */
 public class FillCacheMemoryPressure {
 
@@ -64,33 +64,43 @@ public class FillCacheMemoryPressure {
     private static final Logger logger = LogManager.getLogger(FillCacheMemoryPressure.class);
 
     private final long fillBytesLimit;
-    private final TimeValue stallWarnThreshold;
-    private final ThreadPool threadPool;
-    private final LongUpDownCounter metricCurrentBytes;
-    private final LongUpDownCounter metricWaitingBytes;
-
-    private final Object mutex = new Object();
-    // all guarded by mutex
-    private long currentBytes = 0;
-    private long waitingBytes = 0;
-    private boolean stallCheckScheduled = false;
-    private final ArrayDeque<Waiter> waiters = new ArrayDeque<>();
-
-    private record Waiter(long bytes, Executor executor, ActionListener<Releasable> listener, long enqueuedAtMillis) {}
+    private final MemoryBudget budget;
 
     public FillCacheMemoryPressure(Settings settings, MeterRegistry meterRegistry, ThreadPool threadPool) {
         this.fillBytesLimit = FILL_BYTES_LIMIT.get(settings).getBytes();
-        this.stallWarnThreshold = STALL_WARN_THRESHOLD.get(settings);
-        this.threadPool = threadPool;
-        this.metricCurrentBytes = meterRegistry.registerLongUpDownCounter(
+        final TimeValue stallWarnThreshold = STALL_WARN_THRESHOLD.get(settings);
+
+        final LongUpDownCounter metricCurrentBytes = meterRegistry.registerLongUpDownCounter(
             CURRENT_BYTES_METRIC,
             "Current bytes admitted for in-flight cache-fill reads",
             "bytes"
         );
-        this.metricWaitingBytes = meterRegistry.registerLongUpDownCounter(
+        final LongUpDownCounter metricWaitingBytes = meterRegistry.registerLongUpDownCounter(
             WAITING_BYTES_METRIC,
             "Bytes of cache-fill reads waiting for memory budget",
             "bytes"
+        );
+
+        this.budget = new MemoryBudget(
+            "fill_cache",
+            fillBytesLimit,
+            new NoopCircuitBreaker("fill_cache"), // PoC; production uses a registered child breaker
+            threadPool::relativeTimeInMillis,
+            threadPool, // ThreadPool implements Scheduler; stall checks run on DIRECT_EXECUTOR_SERVICE
+            (noReleaseMillis, headBytes, waiterCount, waitingBytes, currentBytes, limitBytes) -> logger.warn(
+                "cache-fill memory budget stalled: no budget released for [{}] while the queue head waits for [{}] bytes; "
+                    + "[{}] waiters totaling [{}] bytes; [{}] of [{}] bytes admitted but not yet released — "
+                    + "check for admitted reads whose stream was never drained or closed",
+                TimeValue.timeValueMillis(noReleaseMillis),
+                headBytes,
+                waiterCount,
+                waitingBytes,
+                currentBytes,
+                limitBytes
+            ),
+            stallWarnThreshold,
+            metricCurrentBytes::add,
+            metricWaitingBytes::add
         );
     }
 
@@ -101,183 +111,28 @@ public class FillCacheMemoryPressure {
      * pool). Requests larger than the whole limit are granted once nothing else is in flight, so they cannot wait forever.
      */
     public void acquire(long bytes, Executor executor, ActionListener<Releasable> listener) {
-        assert bytes > 0 : "acquiring [" + bytes + "] bytes";
-        final boolean queued;
-        synchronized (mutex) {
-            // don't overtake a waiter — a large queue head could otherwise starve
-            if (waiters.isEmpty() && fits(bytes)) {
-                grant(bytes);
-                queued = false;
-            } else {
-                waiters.addLast(new Waiter(bytes, executor, listener, threadPool.relativeTimeInMillis()));
-                waitingBytes += bytes;
-                metricWaitingBytes.add(bytes);
-                logger.trace(() -> Strings.format("queued fill read of [%d] bytes behind [%d] waiters", bytes, waiters.size() - 1));
-                queued = true;
-                // schedule under mutex so a schedule failure atomically leaves stallCheckScheduled=false;
-                // otherwise a race window between failure and flag-flip could leave the queue silently unmonitored
-                if (stallCheckScheduled == false) {
-                    stallCheckScheduled = tryScheduleStallCheckLocked(stallWarnThreshold);
-                }
-            }
-        }
-        if (queued) {
-            return;
-        }
-        listener.onResponse(releasableFor(bytes));
-    }
-
-    // caller must hold mutex
-    private boolean fits(long bytes) {
-        // oversized request admitted when idle; budget goes transiently over-limit
-        return currentBytes + bytes <= fillBytesLimit || currentBytes == 0;
-    }
-
-    // caller must hold mutex
-    private void grant(long bytes) {
-        currentBytes += bytes;
-        metricCurrentBytes.add(bytes);
-    }
-
-    private Releasable releasableFor(long bytes) {
-        // releaseOnce: harmless double-release in prod; assertOnce still surfaces the caller in tests
-        return Releasables.assertOnce(Releasables.releaseOnce(() -> release(bytes)));
-    }
-
-    private void release(long bytes) {
-        final List<Exception> listenerFailures = new ArrayList<>();
-        // Iterative rather than recursive: each pass returns budget and admits newly-fitting waiters; a grant whose
-        // executor rejects it (node shutting down) has its bytes reclaimed on the next pass. Grants are delivered
-        // off-mutex and forked, so a synchronously-failing read cannot re-enter this method on the same stack.
-        long bytesToReturn = bytes;
-        while (bytesToReturn > 0) {
-            long reclaimed = 0;
-            for (Waiter waiter : returnBudgetAndGrantWaiters(bytesToReturn)) {
-                try {
-                    waiter.executor().execute(() -> deliverGrant(waiter));
-                } catch (Exception e) {
-                    // executor rejected (node shutting down): reclaim budget, fail waiter — but collect (do not
-                    // propagate) any exception from onFailure so subsequent granted waiters are still notified.
-                    // Mirrors ActionListener.onFailure(Iterable, Exception) at server/action/ActionListener.java:319.
-                    reclaimed += waiter.bytes();
-                    try {
-                        waiter.listener().onFailure(e);
-                    } catch (Exception listenerException) {
-                        listenerFailures.add(listenerException);
-                    }
-                }
-            }
-            bytesToReturn = reclaimed;
-        }
-        ExceptionsHelper.maybeThrowRuntimeAndSuppress(listenerFailures);
-    }
-
-    // returns {@code bytes} to the budget and grants waiters, FIFO, while the head fits; the caller must complete
-    // the returned waiters' listeners without holding the mutex
-    private List<Waiter> returnBudgetAndGrantWaiters(long bytes) {
-        final List<Waiter> granted = new ArrayList<>();
-        synchronized (mutex) {
-            currentBytes -= bytes;
-            metricCurrentBytes.add(-bytes);
-            assert currentBytes >= 0 : "fill budget underflow [" + currentBytes + "]";
-            Waiter head;
-            while ((head = waiters.peekFirst()) != null && fits(head.bytes())) {
-                waiters.pollFirst();
-                waitingBytes -= head.bytes();
-                metricWaitingBytes.add(-head.bytes());
-                grant(head.bytes());
-                granted.add(head);
-            }
-        }
-        return granted;
-    }
-
-    // runs on the waiter's executor; hands the Releasable to the listener and releases the budget if the listener throws
-    // before it can take ownership (otherwise the grant would leak — currentBytes stays inflated with no live read).
-    private void deliverGrant(Waiter waiter) {
-        final Releasable budget = releasableFor(waiter.bytes());
-        boolean handedOff = false;
-        try {
-            waiter.listener().onResponse(budget);
-            handedOff = true;
-        } finally {
-            if (handedOff == false) {
-                budget.close();
-            }
-        }
-    }
-
-    // caller must hold mutex
-    private boolean tryScheduleStallCheckLocked(TimeValue delay) {
-        try {
-            threadPool.schedule(this::checkForStalledHeadWaiter, delay, threadPool.generic());
-            return true;
-        } catch (Exception e) {
-            // scheduler rejected (node shutting down): stall monitoring ends
-            return false;
-        }
-    }
-
-    /**
-     * Runs {@link #STALL_WARN_THRESHOLD} after the queue becomes non-empty and re-arms while it stays non-empty (WARN at most once per
-     * period). Watching only the head suffices: FIFO grants mean a stale head implies zero grants in that period.
-     */
-    private void checkForStalledHeadWaiter() {
-        final long headWaitedMillis;
-        final long headBytes;
-        final int waiterCount;
-        final long waitingBytesSnapshot;
-        final long currentBytesSnapshot;
-        synchronized (mutex) {
-            final Waiter head = waiters.peekFirst();
-            if (head == null) {
-                stallCheckScheduled = false;
-                return;
-            }
-            headWaitedMillis = threadPool.relativeTimeInMillis() - head.enqueuedAtMillis();
-            headBytes = head.bytes();
-            waiterCount = waiters.size();
-            waitingBytesSnapshot = waitingBytes;
-            currentBytesSnapshot = currentBytes;
-        }
-        final TimeValue nextDelay;
-        if (headWaitedMillis >= stallWarnThreshold.millis()) {
-            logger.warn(
-                "cache-fill memory budget stalled: no budget released for [{}] while the queue head waits for [{}] bytes; "
-                    + "[{}] waiters totaling [{}] bytes; [{}] of [{}] bytes admitted but not yet released — "
-                    + "check for admitted reads whose stream was never drained or closed",
-                TimeValue.timeValueMillis(headWaitedMillis),
-                headBytes,
-                waiterCount,
-                waitingBytesSnapshot,
-                currentBytesSnapshot,
-                fillBytesLimit
-            );
-            nextDelay = stallWarnThreshold;
-        } else {
-            nextDelay = TimeValue.timeValueMillis(stallWarnThreshold.millis() - headWaitedMillis);
-        }
-        synchronized (mutex) {
-            // re-check under mutex: the queue may have drained between the snapshot above and here
-            if (waiters.isEmpty()) {
-                stallCheckScheduled = false;
-            } else {
-                stallCheckScheduled = tryScheduleStallCheckLocked(nextDelay);
-            }
-        }
+        budget.acquire(bytes, executor, listener);
     }
 
     // exposed for tests
     public long getCurrentBytes() {
-        synchronized (mutex) {
-            return currentBytes;
-        }
+        return budget.current();
     }
 
     // exposed for tests
     public int getWaiterCount() {
-        synchronized (mutex) {
-            return waiters.size();
-        }
+        return budget.waiterCount();
+    }
+
+    /**
+     * Releases {@code bytes} back to the fill budget. This is the internal entry point called by
+     * the {@link Releasable} returned by {@link #acquire}; it is package-private so that test
+     * Javadoc can reference it via {@code {@literal @}link}.
+     *
+     * <p>Callers that already hold the {@link Releasable} from {@link #acquire} must close it
+     * instead of calling this method — calling both causes a double-release.
+     */
+    void release(long bytes) {
+        budget.release(bytes);
     }
 }
