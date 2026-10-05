@@ -45,6 +45,7 @@ import static org.elasticsearch.xpack.core.ClientHelper.MONITORING_ORIGIN;
 import static org.elasticsearch.xpack.core.ClientHelper.OTEL_ORIGIN;
 import static org.elasticsearch.xpack.core.ClientHelper.PROFILING_ORIGIN;
 import static org.elasticsearch.xpack.core.ClientHelper.PROMETHEUS_ORIGIN;
+import static org.elasticsearch.xpack.core.ClientHelper.QUERY_VECTOR_LOG_ORIGIN;
 import static org.elasticsearch.xpack.core.ClientHelper.REINDEX_DATA_STREAM_ORIGIN;
 import static org.elasticsearch.xpack.core.ClientHelper.ROLLUP_ORIGIN;
 import static org.elasticsearch.xpack.core.ClientHelper.SEARCHABLE_SNAPSHOTS_ORIGIN;
@@ -188,6 +189,9 @@ public final class AuthorizationUtils {
                 break;
             case ASYNC_SEARCH_ORIGIN:
                 securityContext.executeAsInternalUser(InternalUsers.ASYNC_SEARCH_USER, version, consumer);
+                break;
+            case QUERY_VECTOR_LOG_ORIGIN:
+                securityContext.executeAsInternalUser(InternalUsers.QUERY_VECTOR_LOG_USER, version, consumer);
                 break;
             case SYNONYMS_ORIGIN:
                 securityContext.executeAsInternalUser(InternalUsers.SYNONYMS_USER, version, consumer);

@@ -330,6 +330,26 @@ public class InternalUsers {
         )
     );
 
+    /** Experiment: least-privilege user for writing sampled query vectors to its own system index. */
+    public static final InternalUser QUERY_VECTOR_LOG_USER = new InternalUser(
+        UsernamesField.QUERY_VECTOR_LOG_USER_NAME,
+        new RoleDescriptor(
+            UsernamesField.QUERY_VECTOR_LOG_ROLE_NAME,
+            new String[] {},
+            new RoleDescriptor.IndicesPrivileges[] {
+                RoleDescriptor.IndicesPrivileges.builder()
+                    .indices(".sysidx-test-*")
+                    .privileges("create_index", "index", "auto_configure")
+                    .allowRestrictedIndices(true)
+                    .build() },
+            null,
+            null,
+            null,
+            MetadataUtils.DEFAULT_RESERVED_METADATA,
+            Map.of()
+        )
+    );
+
     /**
      * Internal user that can manage a cross-project connections (e.g. handshake)
      * and searches (e.g. cancelling).
@@ -372,6 +392,7 @@ public class InternalUsers {
             DATA_STREAM_LIFECYCLE_USER,
             REINDEX_DATA_STREAM_USER,
             SYNONYMS_USER,
+            QUERY_VECTOR_LOG_USER,
             LAZY_ROLLOVER_USER,
             ENRICH_USER,
             CROSS_PROJECT_SEARCH_USER

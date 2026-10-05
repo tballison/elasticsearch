@@ -34,6 +34,8 @@ public final class UsernamesField {
     public static final String STORAGE_ROLE_NAME = "_storage";
     public static final String SYNONYMS_USER_NAME = "_synonyms";
     public static final String SYNONYMS_ROLE_NAME = "_synonyms";
+    public static final String QUERY_VECTOR_LOG_USER_NAME = "_query_vector_log";
+    public static final String QUERY_VECTOR_LOG_ROLE_NAME = "_query_vector_log";
     public static final String CROSS_PROJECT_SEARCH_USER_NAME = "_cross_project_search";
     public static final String CROSS_PROJECT_SEARCH_ROLE_NAME = "_cross_project_search";
 
