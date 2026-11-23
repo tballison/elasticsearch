@@ -13,6 +13,7 @@ import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.features.NodeFeature;
 import org.elasticsearch.index.mapper.FieldMapper;
 import org.elasticsearch.index.mapper.Mapper;
+import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper;
 import org.elasticsearch.license.License;
 import org.elasticsearch.license.LicenseUtils;
 import org.elasticsearch.license.LicensedFeature;
@@ -65,6 +66,20 @@ public class RankVectorsPlugin extends Plugin implements MapperPlugin, SearchPlu
         Setting.Property.Dynamic,
         Setting.Property.ServerlessPublic
     );
+    public static final Setting<Integer> INDEX_MUVERA_CANDIDATE_BITS = Setting.intSetting(
+        "index.rank_vectors.muvera.candidate.bits",
+        1,
+        1,
+        8,
+        Setting.Property.IndexScope
+    );
+    public static final Setting<DenseVectorFieldMapper.BBQIVFIndexOptions.QuantizationType> INDEX_MUVERA_CANDIDATE_QUANTIZATION_TYPE =
+        Setting.enumSetting(
+            DenseVectorFieldMapper.BBQIVFIndexOptions.QuantizationType.class,
+            "index.rank_vectors.muvera.candidate.quantization_type",
+            DenseVectorFieldMapper.BBQIVFIndexOptions.QuantizationType.OSQ,
+            Setting.Property.IndexScope
+        );
 
     @Override
     public Map<String, Mapper.TypeParser> getMappers() {
@@ -80,7 +95,9 @@ public class RankVectorsPlugin extends Plugin implements MapperPlugin, SearchPlu
                 INDEX_MAPPING_EXCLUDE_SOURCE_VECTORS_SETTING.get(c.getIndexSettings().getSettings()),
                 DENSE_VECTOR_EXPERIMENTAL_FEATURES_SETTING.get(c.getIndexSettings().getSettings()),
                 c.clusterHasFeature(RANK_VECTORS_MUVERA_INDEXING),
-                c.getVectorsFormatProviders()
+                c.getVectorsFormatProviders(),
+                INDEX_MUVERA_CANDIDATE_BITS.get(c.getIndexSettings().getSettings()),
+                INDEX_MUVERA_CANDIDATE_QUANTIZATION_TYPE.get(c.getIndexSettings().getSettings())
             );
         }, notInMultiFields(CONTENT_TYPE)));
     }
@@ -105,7 +122,12 @@ public class RankVectorsPlugin extends Plugin implements MapperPlugin, SearchPlu
 
     @Override
     public List<Setting<?>> getSettings() {
-        return List.of(RANK_VECTORS_EVAL_ENABLED, INDEX_RANK_VECTORS_EVAL_ENABLED);
+        return List.of(
+            RANK_VECTORS_EVAL_ENABLED,
+            INDEX_RANK_VECTORS_EVAL_ENABLED,
+            INDEX_MUVERA_CANDIDATE_BITS,
+            INDEX_MUVERA_CANDIDATE_QUANTIZATION_TYPE
+        );
     }
 
     @Override

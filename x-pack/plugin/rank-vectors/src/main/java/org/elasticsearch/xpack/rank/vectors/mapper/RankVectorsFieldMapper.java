@@ -177,6 +177,8 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
         private final boolean experimentalFeaturesEnabled;
         private final boolean muveraIndexingSupported;
         private final List<VectorsFormatProvider> vectorsFormatProviders;
+        private final int muveraCandidateBits;
+        private final DenseVectorFieldMapper.BBQIVFIndexOptions.QuantizationType muveraCandidateQuantizationType;
 
         public Builder(
             String name,
@@ -188,6 +190,32 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
             boolean muveraIndexingSupported,
             List<VectorsFormatProvider> vectorsFormatProviders
         ) {
+            this(
+                name,
+                indexCreatedVersion,
+                indexMode,
+                licenseState,
+                isExcludeSourceVectors,
+                experimentalFeaturesEnabled,
+                muveraIndexingSupported,
+                vectorsFormatProviders,
+                1,
+                DenseVectorFieldMapper.BBQIVFIndexOptions.QuantizationType.OSQ
+            );
+        }
+
+        public Builder(
+            String name,
+            IndexVersion indexCreatedVersion,
+            IndexMode indexMode,
+            XPackLicenseState licenseState,
+            boolean isExcludeSourceVectors,
+            boolean experimentalFeaturesEnabled,
+            boolean muveraIndexingSupported,
+            List<VectorsFormatProvider> vectorsFormatProviders,
+            int muveraCandidateBits,
+            DenseVectorFieldMapper.BBQIVFIndexOptions.QuantizationType muveraCandidateQuantizationType
+        ) {
             super(name);
             this.indexCreatedVersion = indexCreatedVersion;
             this.indexMode = indexMode;
@@ -196,6 +224,8 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
             this.experimentalFeaturesEnabled = experimentalFeaturesEnabled;
             this.muveraIndexingSupported = muveraIndexingSupported;
             this.vectorsFormatProviders = vectorsFormatProviders;
+            this.muveraCandidateBits = muveraCandidateBits;
+            this.muveraCandidateQuantizationType = muveraCandidateQuantizationType;
         }
 
         public Builder dimensions(int dimensions) {
@@ -244,7 +274,9 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
                 experimentalFeaturesEnabled,
                 muveraIndexingSupported,
                 vectorsFormatProviders,
-                encodingProfile == null ? null : encodingProfile.encoder()
+                encodingProfile == null ? null : encodingProfile.encoder(),
+                muveraCandidateBits,
+                muveraCandidateQuantizationType
             );
         }
 
@@ -494,6 +526,8 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
     @Nullable
     private final DenseVectorFieldMapper.DenseVectorIndexOptions muveraCandidateIndexOptions;
     private final MuveraEncoder muveraEncoder;
+    private final int muveraCandidateBits;
+    private final DenseVectorFieldMapper.BBQIVFIndexOptions.QuantizationType muveraCandidateQuantizationType;
 
     /** Returns the immutable encoding profile selected for an index creation version. */
     public static String muveraEncodingProfile(IndexVersion indexCreatedVersion) {
@@ -516,7 +550,9 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
         boolean experimentalFeaturesEnabled,
         boolean muveraIndexingSupported,
         List<VectorsFormatProvider> vectorsFormatProviders,
-        MuveraEncoder muveraEncoder
+        MuveraEncoder muveraEncoder,
+        int muveraCandidateBits,
+        DenseVectorFieldMapper.BBQIVFIndexOptions.QuantizationType muveraCandidateQuantizationType
     ) {
         super(simpleName, fieldType, params);
         this.indexCreatedVersion = indexCreatedVersion;
@@ -527,6 +563,8 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
         this.muveraIndexingSupported = muveraIndexingSupported;
         this.vectorsFormatProviders = vectorsFormatProviders;
         this.muveraEncoder = muveraEncoder;
+        this.muveraCandidateBits = muveraCandidateBits;
+        this.muveraCandidateQuantizationType = muveraCandidateQuantizationType;
         this.muveraCandidateIndexOptions = muveraEncoder == null ? null : createMuveraCandidateIndexOptions();
     }
 
@@ -539,10 +577,10 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
             new DenseVectorFieldMapper.RescoreVector(DenseVectorFieldMapper.DEFAULT_OVERSAMPLE),
             indexCreatedVersion,
             false,
-            1,
+            muveraCandidateBits,
             experimentalFeaturesEnabled,
             DenseVectorAutoCalibrate.disabled(),
-            DenseVectorFieldMapper.BBQIVFIndexOptions.QuantizationType.OSQ,
+            muveraCandidateQuantizationType,
             false
         );
     }
@@ -734,7 +772,9 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
             isExcludeSourceVectors,
             experimentalFeaturesEnabled,
             muveraIndexingSupported,
-            vectorsFormatProviders
+            vectorsFormatProviders,
+            muveraCandidateBits,
+            muveraCandidateQuantizationType
         ).init(this);
     }
 
