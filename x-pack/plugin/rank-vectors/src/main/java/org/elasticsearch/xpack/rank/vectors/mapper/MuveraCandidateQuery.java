@@ -23,7 +23,7 @@ import static org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper.DEFA
 
 /**
  * Acquires raw MUVERA candidates without exact rescoring. This query exists only for the
- * private evaluation action and is deliberately not exposed through public query XContent.
+ * experimental evaluation API and is deliberately not exposed through public query XContent.
  */
 public final class MuveraCandidateQuery extends Query {
 

@@ -280,13 +280,6 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
                         + "]"
                 );
             }
-            if (vectorsFormatProviders == null
-                || vectorsFormatProviders.stream()
-                    .noneMatch(
-                        provider -> provider.isVectorIndexTypeAllowed(indexCreatedVersion, DenseVectorFieldMapper.VectorIndexType.BBQ_DISK)
-                    )) {
-                throw new IllegalArgumentException("Indexed MUVERA rank_vectors fields require the [bbq_disk] vector format provider");
-            }
         }
     }
 
@@ -434,12 +427,12 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
             return new ExactRankVectorsQuery(name(), queryVectors, dims);
         }
 
-        /** Returns the raw per-shard MUVERA candidate query used by the private evaluation action. */
+        /** Returns the raw per-shard MUVERA candidate query used by the experimental evaluation API. */
         public Query muveraCandidateQuery(float[][] queryVectors, int k, int numCandidates, @Nullable Query filter) {
             return muveraCandidateQuery(queryVectors, k, numCandidates, null, filter);
         }
 
-        /** Returns the raw per-shard MUVERA candidate query used by the private evaluation action. */
+        /** Returns the raw per-shard MUVERA candidate query used by the experimental evaluation API. */
         public Query muveraCandidateQuery(
             float[][] queryVectors,
             int k,
@@ -650,6 +643,7 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
             for (int i = 0; i < vectors.size(); i++) {
                 tokenVectors[i] = vectors.get(i).asFloatVector();
             }
+            // TODO: Avoid retaining a full-float FDE once DiskBBQ can index its quantized representation without raw vector storage.
             context.doc()
                 .add(
                     new KnnFloatVectorField(

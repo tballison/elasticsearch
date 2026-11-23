@@ -7,9 +7,13 @@
 
 package org.elasticsearch.xpack.rank.vectors.mapper;
 
-import org.elasticsearch.index.mapper.MapperParsingException;
+import org.elasticsearch.common.util.BigArrays;
+import org.elasticsearch.index.codec.CodecService;
+import org.elasticsearch.index.codec.PerFieldMapperCodec;
+import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.MapperServiceTestCase;
 import org.elasticsearch.plugins.Plugin;
+import org.elasticsearch.threadpool.TestThreadPool;
 import org.elasticsearch.xpack.rank.vectors.LocalStateRankVectors;
 
 import java.util.Collection;
@@ -25,12 +29,17 @@ public class RankVectorsProviderValidationTests extends MapperServiceTestCase {
     }
 
     public void testIndexedMuveraRequiresDiskBbqProvider() throws Exception {
-        MapperParsingException e = expectThrows(MapperParsingException.class, () -> createMapperService(fieldMapping(b -> {
+        MapperService mapperService = createMapperService(fieldMapping(b -> {
             b.field("type", "rank_vectors");
             b.field("dims", RankVectorsFieldMapper.MUVERA_TOKEN_DIMS);
             b.field("index", true);
-        })));
-        assertThat(e.getMessage(), containsString("require the [bbq_disk] vector format provider"));
+        }));
+        try (TestThreadPool threadPool = new TestThreadPool(getTestName())) {
+            PerFieldMapperCodec codec = (PerFieldMapperCodec) new CodecService(mapperService, BigArrays.NON_RECYCLING_INSTANCE, threadPool)
+                .codec("default");
+            IllegalStateException e = expectThrows(IllegalStateException.class, () -> codec.getKnnVectorsFormatForField("field"));
+            assertThat(e.getMessage(), containsString("requires the [bbq_disk] vector format provider"));
+        }
     }
 
     public void testNonIndexedRankVectorsDoesNotRequireDiskBbqProvider() throws Exception {

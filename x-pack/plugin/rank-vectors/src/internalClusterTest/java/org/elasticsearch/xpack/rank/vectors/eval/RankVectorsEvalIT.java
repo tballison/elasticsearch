@@ -96,6 +96,40 @@ public class RankVectorsEvalIT extends ESIntegTestCase {
         assertEquals(1.0, response.finalRecall(), 0.0);
     }
 
+    public void testDuplicateIdsOnDifferentRoutedShardsRemainDistinct() throws Exception {
+        createIndex();
+        index("duplicate", 0, tokens(0, 1));
+        index("duplicate", 1, tokens(0, 1));
+        refresh(INDEX);
+
+        RankVectorsEvalRequest request = new RankVectorsEvalRequest(
+            new RankVectorsEvalSpec("vectors", tokens(0, 1), 2, 2, new RescoreVectorBuilder(1f), true),
+            new String[] { INDEX }
+        );
+        RankVectorsEvalResponse response = client().execute(RankVectorsPlugin.RANK_VECTORS_EVAL_ACTION, request).actionGet();
+        assertEquals(2, response.baselineCount());
+        assertEquals(2, response.candidateCount());
+        assertEquals(1.0, response.candidateRecall(), 0.0);
+        assertEquals(1.0, response.finalRecall(), 0.0);
+    }
+
+    public void testOversampleLargerThanNumCandidatesAcrossShards() throws Exception {
+        createIndex();
+        for (int i = 0; i < 4; i++) {
+            index("doc-" + i, i % 2, tokens(i, i + 1));
+        }
+        refresh(INDEX);
+
+        RankVectorsEvalRequest request = new RankVectorsEvalRequest(
+            new RankVectorsEvalSpec("vectors", tokens(0, 1), 2, 2, new RescoreVectorBuilder(3f), true),
+            new String[] { INDEX }
+        );
+        RankVectorsEvalResponse response = client().execute(RankVectorsPlugin.RANK_VECTORS_EVAL_ACTION, request).actionGet();
+        assertEquals(2, response.baselineCount());
+        assertEquals(1.0, response.candidateRecall(), 0.0);
+        assertEquals(1.0, response.finalRecall(), 0.0);
+    }
+
     private void createIndex() throws Exception {
         try (
             XContentBuilder mapping = XContentFactory.jsonBuilder()

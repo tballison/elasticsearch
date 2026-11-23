@@ -10,7 +10,6 @@ package org.elasticsearch.xpack.rank.vectors.mapper;
 import org.apache.lucene.index.FloatVectorValues;
 import org.apache.lucene.index.KnnVectorValues;
 import org.apache.lucene.tests.util.LuceneTestCase;
-import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.index.engine.Engine;
@@ -128,8 +127,7 @@ public class RankVectorsReplicationIT extends ESIntegTestCase {
         );
 
         public LicensedDiskBBQPlugin(Settings settings) {
-            // DiskBBQ is licensed on stateless nodes. Pass that mode to the provider without changing the test nodes' engine mode.
-            super(Settings.builder().put(settings).put(DiscoveryNode.STATELESS_ENABLED_SETTING_NAME, true).build());
+            super(settings);
         }
 
         @Override

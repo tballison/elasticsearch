@@ -15,7 +15,6 @@ import org.apache.lucene.search.KnnFloatVectorQuery;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.util.BytesRef;
-import org.elasticsearch.cluster.node.DiscoveryNode;
 import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.BigArrays;
@@ -54,11 +53,9 @@ import static org.hamcrest.Matchers.instanceOf;
 
 public class RankVectorsDiskBBQIntegrationTests extends MapperServiceTestCase {
 
-    private static final Settings STATELESS_SETTINGS = Settings.builder().put(DiscoveryNode.STATELESS_ENABLED_SETTING_NAME, true).build();
-
     @Override
     protected Collection<? extends Plugin> getPlugins() {
-        return List.of(new LocalStateRankVectors(STATELESS_SETTINGS), new TestDiskBBQPlugin(STATELESS_SETTINGS));
+        return List.of(new LocalStateRankVectors(Settings.EMPTY), new TestDiskBBQPlugin(Settings.EMPTY));
     }
 
     private static class TestDiskBBQPlugin extends DiskBBQPlugin {

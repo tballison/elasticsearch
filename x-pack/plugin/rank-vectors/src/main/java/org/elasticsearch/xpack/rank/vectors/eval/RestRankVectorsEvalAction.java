@@ -29,9 +29,10 @@ import org.elasticsearch.xpack.rank.vectors.RankVectorsPlugin;
 import java.io.IOException;
 import java.util.List;
 
+import static org.elasticsearch.rest.RestRequest.Method.GET;
 import static org.elasticsearch.rest.RestRequest.Method.POST;
 
-/** REST handler for the private rank-vectors recall diagnostic. */
+/** REST handler for the experimental rank-vectors recall API. */
 @ServerlessScope(Scope.PUBLIC)
 public final class RestRankVectorsEvalAction extends BaseRestHandler {
 
@@ -39,7 +40,7 @@ public final class RestRankVectorsEvalAction extends BaseRestHandler {
 
     @Override
     public List<Route> routes() {
-        return List.of(new Route(POST, "/{index}/" + ENDPOINT));
+        return List.of(new Route(GET, "/{index}/" + ENDPOINT), new Route(POST, "/{index}/" + ENDPOINT));
     }
 
     @Override

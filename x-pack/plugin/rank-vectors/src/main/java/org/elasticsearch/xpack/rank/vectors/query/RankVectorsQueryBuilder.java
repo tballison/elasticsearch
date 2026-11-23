@@ -404,6 +404,7 @@ public final class RankVectorsQueryBuilder extends LeafQueryBuilder<RankVectorsQ
     /** Rejects a MaxSim rescore whose worst-case dot-product count exceeds the query safety limit. */
     public static void validateRescoreWork(int queryVectorCount, int k, int numCandidates, float oversample) {
         int rescoreCandidates = Math.min(numCandidates, (int) Math.ceil(k * oversample));
+        // TODO: Add a request-wide limit; this bound applies independently on every participating shard.
         long exactDotProducts = Math.multiplyExact(
             Math.multiplyExact((long) rescoreCandidates, RankVectorsFieldMapper.MAX_MUVERA_VECTORS),
             queryVectorCount

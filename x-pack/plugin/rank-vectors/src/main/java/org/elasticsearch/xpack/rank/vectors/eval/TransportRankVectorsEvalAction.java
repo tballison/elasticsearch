@@ -283,7 +283,9 @@ public final class TransportRankVectorsEvalAction extends HandledTransportAction
             }
             boolean cutoffTie = allExactHits.length > spec.k()
                 && Float.compare(allExactHits[spec.k() - 1].getScore(), allExactHits[spec.k()].getScore()) == 0;
-            List<RankVectorsEvalResponse.Hit> exactHits = copyHits(allExactHits, Math.min(spec.k(), allExactHits.length));
+            int exactHitCount = Math.min(spec.k(), allExactHits.length);
+            List<RankVectorsEvalResponse.Hit> exactHits = copyHits(allExactHits, exactHitCount);
+            Set<Identity> exactIds = identities(allExactHits, exactHitCount);
             runCandidates(
                 task,
                 spec,
@@ -293,6 +295,7 @@ public final class TransportRankVectorsEvalAction extends HandledTransportAction
                 exactWork,
                 pit,
                 exactHits,
+                exactIds,
                 cutoffTie,
                 response.getTook().millis(),
                 delegate
@@ -309,6 +312,7 @@ public final class TransportRankVectorsEvalAction extends HandledTransportAction
         long exactWork,
         BytesReference pit,
         List<RankVectorsEvalResponse.Hit> exactHits,
+        Set<Identity> exactIds,
         boolean cutoffTie,
         long exactTook,
         ActionListener<RankVectorsEvalResponse> listener
@@ -336,6 +340,7 @@ public final class TransportRankVectorsEvalAction extends HandledTransportAction
                 exactWork,
                 pit,
                 exactHits,
+                exactIds,
                 cutoffTie,
                 exactTook,
                 candidateIds,
@@ -354,6 +359,7 @@ public final class TransportRankVectorsEvalAction extends HandledTransportAction
         long exactWork,
         BytesReference pit,
         List<RankVectorsEvalResponse.Hit> exactHits,
+        Set<Identity> exactIds,
         boolean cutoffTie,
         long exactTook,
         Set<Identity> candidateIds,
@@ -371,7 +377,6 @@ public final class TransportRankVectorsEvalAction extends HandledTransportAction
             if (candidateIds.containsAll(finalIds) == false) {
                 throw new IllegalStateException("final rank_vectors hits were not a subset of raw MUVERA candidates");
             }
-            Set<Identity> exactIds = identities(exactHits);
             int candidateIntersection = intersection(exactIds, candidateIds);
             int finalIntersection = intersection(exactIds, finalIds);
             if (finalIntersection > candidateIntersection) {
@@ -484,17 +489,14 @@ public final class TransportRankVectorsEvalAction extends HandledTransportAction
     }
 
     private static Set<Identity> identities(SearchHit[] hits) {
-        Set<Identity> result = new HashSet<>();
-        for (SearchHit hit : hits) {
-            result.add(new Identity(hit.getIndex(), hit.getId()));
-        }
-        return result;
+        return identities(hits, hits.length);
     }
 
-    private static Set<Identity> identities(List<RankVectorsEvalResponse.Hit> hits) {
+    private static Set<Identity> identities(SearchHit[] hits, int count) {
         Set<Identity> result = new HashSet<>();
-        for (RankVectorsEvalResponse.Hit hit : hits) {
-            result.add(new Identity(hit.index(), hit.id()));
+        for (int i = 0; i < count; i++) {
+            SearchHit hit = hits[i];
+            result.add(new Identity(hit.getIndex(), hit.getShard().getShardId().getId(), hit.getId()));
         }
         return result;
     }
@@ -516,7 +518,7 @@ public final class TransportRankVectorsEvalAction extends HandledTransportAction
         return left > Long.MAX_VALUE / right ? Long.MAX_VALUE : left * right;
     }
 
-    private record Identity(String index, String id) {}
+    private record Identity(String index, int shard, String id) {}
 
     private record IndexValidation(int primaryShards, String encodingProfile, int encodingVersion) {}
 
