@@ -280,7 +280,8 @@ public class DenseVectorFieldMapper extends FieldMapper implements KnnVectorsFor
     public static final IndexVersion ES_VERSION_94 = IndexVersions.KEYWORD_FIELDS_KEEP_DUPLICATES_IN_BINARY_DOC_VALUES;
 
     public static final String CONTENT_TYPE = "dense_vector";
-    public static final short MAX_DIMS_COUNT = 4096; // maximum allowed number of dimensions
+    // Local experiment only: permit the 10,240- and 15,360-dimensional MUVERA FDE arms.
+    public static final short MAX_DIMS_COUNT = 16384; // maximum allowed number of dimensions
     public static final int MAX_DIMS_COUNT_BIT = 4096 * Byte.SIZE; // maximum allowed number of dimensions
 
     // minimum number of dims for floats to be dynamically mapped to vector
