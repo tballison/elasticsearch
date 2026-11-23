@@ -18,7 +18,7 @@ import org.apache.lucene.search.ScoreDoc;
 import org.apache.lucene.search.TopDocs;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.core.Nullable;
-import org.elasticsearch.script.field.vectors.FloatRankVectors;
+import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper.ElementType;
 import org.elasticsearch.search.internal.ContextIndexSearcher;
 import org.elasticsearch.search.vectors.KnnScoreDocQuery;
 import org.elasticsearch.xpack.rank.vectors.fde.MuveraEncoder;
@@ -51,6 +51,7 @@ final class MuveraMaxSimQuery extends Query {
     @Nullable
     private final Query filter;
     private final MuveraEncoder encoder;
+    private final ElementType elementType;
 
     MuveraMaxSimQuery(String field, float[][] queryVectors, int k, int numCandidates, @Nullable Query filter, MuveraEncoder encoder) {
         this(field, queryVectors, k, numCandidates, null, filter, encoder);
@@ -64,6 +65,19 @@ final class MuveraMaxSimQuery extends Query {
         @Nullable Float queryOversample,
         @Nullable Query filter,
         MuveraEncoder encoder
+    ) {
+        this(field, queryVectors, k, numCandidates, queryOversample, filter, encoder, ElementType.FLOAT);
+    }
+
+    MuveraMaxSimQuery(
+        String field,
+        float[][] queryVectors,
+        int k,
+        int numCandidates,
+        @Nullable Float queryOversample,
+        @Nullable Query filter,
+        MuveraEncoder encoder,
+        ElementType elementType
     ) {
         if (queryVectors == null || queryVectors.length == 0) {
             throw new IllegalArgumentException("query vectors must not be empty");
@@ -99,6 +113,7 @@ final class MuveraMaxSimQuery extends Query {
         this.queryOversample = queryOversample;
         this.filter = filter;
         this.encoder = Objects.requireNonNull(encoder);
+        this.elementType = Objects.requireNonNull(elementType);
         this.encoder.validateQueryVectors(this.queryVectors);
     }
 
@@ -132,7 +147,13 @@ final class MuveraMaxSimQuery extends Query {
             }
             int segmentDoc = candidate.doc - leaf.docBase;
             if (binary.advanceExact(segmentDoc)) {
-                float rawMaxSim = exactMaxSim(queryVectors, binary.binaryValue(), RankVectorsFieldMapper.MUVERA_TOKEN_DIMS, checkCancelled);
+                float rawMaxSim = exactMaxSim(
+                    elementType,
+                    queryVectors,
+                    binary.binaryValue(),
+                    RankVectorsFieldMapper.MUVERA_TOKEN_DIMS,
+                    checkCancelled
+                );
                 rescored.add(new ScoreDoc(candidate.doc, score(rawMaxSim)));
             }
         }
@@ -148,11 +169,17 @@ final class MuveraMaxSimQuery extends Query {
     }
 
     static float exactMaxSim(float[][] queryVectors, BytesRef documentVectors, int dimensions, Runnable checkCancelled) {
-        int vectorBytes = Math.multiplyExact(dimensions, Float.BYTES);
-        if (documentVectors.length == 0 || documentVectors.length % vectorBytes != 0) {
-            throw new IllegalArgumentException("invalid rank_vectors binary doc value length [" + documentVectors.length + "]");
-        }
-        int documentVectorCount = documentVectors.length / vectorBytes;
+        return exactMaxSim(ElementType.FLOAT, queryVectors, documentVectors, dimensions, checkCancelled);
+    }
+
+    static float exactMaxSim(
+        ElementType elementType,
+        float[][] queryVectors,
+        BytesRef documentVectors,
+        int dimensions,
+        Runnable checkCancelled
+    ) {
+        RankVectorsElementScoring.vectorCount(elementType, documentVectors, dimensions);
         for (float[] queryVector : queryVectors) {
             if (queryVector.length != dimensions) {
                 throw new IllegalArgumentException(
@@ -161,7 +188,7 @@ final class MuveraMaxSimQuery extends Query {
             }
         }
         checkCancelled.run();
-        float score = FloatRankVectors.maxSimDotProduct(documentVectors, documentVectorCount, dimensions, queryVectors);
+        float score = RankVectorsElementScoring.maxSim(elementType, queryVectors, documentVectors, dimensions);
         checkCancelled.run();
         return score;
     }
@@ -196,12 +223,23 @@ final class MuveraMaxSimQuery extends Query {
             && numCandidates == other.numCandidates
             && Objects.equals(queryOversample, other.queryOversample)
             && Objects.equals(filter, other.filter)
-            && encoder == other.encoder;
+            && encoder == other.encoder
+            && elementType == other.elementType;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(classHash(), field, Arrays.deepHashCode(queryVectors), k, numCandidates, queryOversample, filter, encoder);
+        return Objects.hash(
+            classHash(),
+            field,
+            Arrays.deepHashCode(queryVectors),
+            k,
+            numCandidates,
+            queryOversample,
+            filter,
+            encoder,
+            elementType
+        );
     }
 
     private static float[][] deepCopy(float[][] vectors) {

@@ -513,18 +513,22 @@ public class RankVectorsFieldMapperTests extends SyntheticVectorsMapperTestCase 
 
         e = expectThrows(MapperParsingException.class, () -> createMapperService(fieldMapping(b -> {
             b.field("type", "rank_vectors");
-            b.field("dims", RankVectorsFieldMapper.MUVERA_TOKEN_DIMS);
-            b.field("element_type", "byte");
-            b.field("index", true);
-        })));
-        assertThat(e.getMessage(), containsString("require [element_type] to be [float]"));
-
-        e = expectThrows(MapperParsingException.class, () -> createMapperService(fieldMapping(b -> {
-            b.field("type", "rank_vectors");
             b.field("dims", 64);
             b.field("index", true);
         })));
         assertThat(e.getMessage(), containsString("requires [dims] to be [128]"));
+    }
+
+    public void testIndexedMuveraAcceptsQuantizedElementTypes() throws IOException {
+        for (String elementType : List.of("bfloat16", "byte", "bit")) {
+            MapperService mapperService = createMapperService(fieldMapping(b -> {
+                b.field("type", "rank_vectors");
+                b.field("dims", RankVectorsFieldMapper.MUVERA_TOKEN_DIMS);
+                b.field("element_type", elementType);
+                b.field("index", true);
+            }));
+            assertTrue(((RankVectorsFieldMapper.RankVectorsFieldType) mapperService.fieldType("field")).isSearchable());
+        }
     }
 
     public void testIndexedMuveraRejectsPublicIndexOptions() {

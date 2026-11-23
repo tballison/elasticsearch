@@ -19,6 +19,7 @@ import org.apache.lucene.search.ScoreMode;
 import org.apache.lucene.search.Scorer;
 import org.apache.lucene.search.ScorerSupplier;
 import org.apache.lucene.search.Weight;
+import org.elasticsearch.index.mapper.vectors.DenseVectorFieldMapper.ElementType;
 import org.elasticsearch.search.internal.ContextIndexSearcher;
 
 import java.io.IOException;
@@ -36,11 +37,17 @@ final class ExactRankVectorsQuery extends Query {
     private final String field;
     private final float[][] queryVectors;
     private final int dimensions;
+    private final ElementType elementType;
 
     ExactRankVectorsQuery(String field, float[][] queryVectors, int dimensions) {
+        this(field, queryVectors, dimensions, ElementType.FLOAT);
+    }
+
+    ExactRankVectorsQuery(String field, float[][] queryVectors, int dimensions, ElementType elementType) {
         this.field = Objects.requireNonNull(field);
         this.queryVectors = deepCopy(queryVectors);
         this.dimensions = dimensions;
+        this.elementType = Objects.requireNonNull(elementType);
     }
 
     @Override
@@ -86,6 +93,7 @@ final class ExactRankVectorsQuery extends Query {
                             public float score() throws IOException {
                                 checkCancelled.run();
                                 float rawScore = MuveraMaxSimQuery.exactMaxSim(
+                                    elementType,
                                     queryVectors,
                                     values.binaryValue(),
                                     dimensions,
@@ -131,12 +139,15 @@ final class ExactRankVectorsQuery extends Query {
             return false;
         }
         ExactRankVectorsQuery other = (ExactRankVectorsQuery) object;
-        return field.equals(other.field) && Arrays.deepEquals(queryVectors, other.queryVectors) && dimensions == other.dimensions;
+        return field.equals(other.field)
+            && Arrays.deepEquals(queryVectors, other.queryVectors)
+            && dimensions == other.dimensions
+            && elementType == other.elementType;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(classHash(), field, Arrays.deepHashCode(queryVectors), dimensions);
+        return Objects.hash(classHash(), field, Arrays.deepHashCode(queryVectors), dimensions, elementType);
     }
 
     private static float[][] deepCopy(float[][] vectors) {

@@ -261,11 +261,6 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
                         + "]"
                 );
             }
-            if (elementType.getValue() != ElementType.FLOAT) {
-                throw new IllegalArgumentException(
-                    "Indexed MUVERA rank_vectors fields require [element_type] to be [float], got [" + elementType.getValue() + "]"
-                );
-            }
             if (dims.getValue() == null) {
                 throw new IllegalArgumentException("Indexed MUVERA rank_vectors fields require [dims] to be configured");
             }
@@ -423,7 +418,16 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
             if (encodingProfile == null) {
                 throw new IllegalArgumentException("Field [" + name() + "] is not indexed for approximate MaxSim search");
             }
-            return new MuveraMaxSimQuery(name(), queryVectors, k, numCandidates, queryOversample, filter, encodingProfile.encoder());
+            return new MuveraMaxSimQuery(
+                name(),
+                queryVectors,
+                k,
+                numCandidates,
+                queryOversample,
+                filter,
+                encodingProfile.encoder(),
+                element.elementType()
+            );
         }
 
         /** Returns a native brute-force MaxSim query for evaluation baselines. */
@@ -431,7 +435,7 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
             if (RANK_VECTORS_FEATURE.check(licenseState) == false) {
                 throw LicenseUtils.newComplianceException("Rank Vectors");
             }
-            return new ExactRankVectorsQuery(name(), queryVectors, dims);
+            return new ExactRankVectorsQuery(name(), queryVectors, dims, element.elementType());
         }
 
         /** Returns the raw per-shard MUVERA candidate query used by the private evaluation action. */
@@ -646,10 +650,7 @@ public class RankVectorsFieldMapper extends FieldMapper implements KnnVectorsFor
                 new BinaryDocValuesField(vectorMagnitudeFieldName, new BytesRef(magnitudeBuffer.array()))
             );
         if (muveraEncoder != null) {
-            float[][] tokenVectors = new float[vectors.size()][];
-            for (int i = 0; i < vectors.size(); i++) {
-                tokenVectors[i] = vectors.get(i).asFloatVector();
-            }
+            float[][] tokenVectors = RankVectorsElementScoring.decodeUnitTokens(element.elementType(), new BytesRef(buffer.array()), dims);
             context.doc()
                 .add(
                     new KnnFloatVectorField(
